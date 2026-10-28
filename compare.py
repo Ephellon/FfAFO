@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Iterable, Protocol
 from urllib.parse import urlparse
 from audio_sig import HOP_SIZE, TARGET_RATE, align_excerpt, subfingerprints
+from envfile import load_env
 from library_index import INDEX_PATH, LibraryIndex
 from scan_folder import EXTENSIONS, decode_audio
 
@@ -62,9 +63,35 @@ class Adapter(Protocol):
 
 
 def default_adapters(country: str = "US") -> list[Adapter]:
-    """Services in precedence order (PLAN.md §4). Spotify, YouTube Music and SoundCloud are added in later build steps."""
-    from apple import AppleAdapter   # imported here: apple.py imports this module's types
-    return [AppleAdapter(country=country)]
+    """Services in precedence order (PLAN.md §4): Spotify when configured and usable, then Apple Music.
+
+    Spotify is checked once up front; if it is unusable a JSON warning goes to stderr and the run continues
+    without it, so stored --resume results only ever name services that really took part.
+    """
+    from apple import AppleAdapter   # imported here: the adapters import this module's types
+    from spotify import SpotifyAdapter
+    load_env()
+    adapters: list[Adapter] = []
+    spotify = SpotifyAdapter.from_env(market=country)
+    if spotify is not None:
+        try:
+            spotify.check()
+            adapters.append(spotify)
+        except Exception as exc:
+            print(json.dumps({"warning": f"Spotify skipped: {exc}"}, ensure_ascii=False), file=sys.stderr)
+    return adapters + [AppleAdapter(country=country)]
+
+
+class _Memo:
+    """Per-track memo so precedence and audio-source selection never query a service twice."""
+
+    def __init__(self, adapter: Adapter):
+        self.adapter, self.name, self._found = adapter, adapter.name, None
+
+    def find(self, track: LibraryTrack) -> list[ServiceTrack]:
+        if self._found is None:
+            self._found = self.adapter.find(track)
+        return self._found
 
 
 def _first(tags: dict, *keys: str) -> str | None:
@@ -215,20 +242,36 @@ def audio_check(track: LibraryTrack, ref: ServiceTrack, index: LibraryIndex | No
     return info, None
 
 
+def audio_reference(track: LibraryTrack, ref: ServiceTrack, adapters: Iterable[Adapter]) -> ServiceTrack | None:
+    """Where the audio check gets its clip: the reference itself, else (e.g. Spotify, which has no previews) the
+    first other service with a confident candidate that has one, preferring the reference's ISRC."""
+    if ref.preview_url:
+        return ref
+    for adapter in adapters:
+        if adapter.name == ref.service:
+            continue
+        found = [c for c in adapter.find(track) if c.preview_url and is_confident(track, c)]
+        if found:
+            return next((c for c in found if ref.isrc and c.isrc == ref.isrc), found[0])
+    return None
+
+
 def compare(track: LibraryTrack, adapters: Iterable[Adapter], audio: bool = True, index: LibraryIndex | None = None,
             accel: bool = True) -> dict:
+    adapters = [_Memo(a) for a in adapters]
     ref = pick_reference(track, adapters)
     if ref is None:
         return {"file": track.path, "status": "unresolved"}
     mismatches = check_track(track, ref)
     record = {"file": track.path, "reference": {"service": ref.service, "id": ref.id, "url": ref.url}}
-    # Spotify (step 6) has no previews; the audio source for a Spotify reference is resolved there.
-    if audio and ref.preview_url:
+    if audio:
         try:
-            record["audio"], mismatch = audio_check(track, ref, index, accel)
-            if mismatch: mismatches.append(mismatch)
+            source = audio_reference(track, ref, adapters)
+            if source is not None:
+                record["audio"], mismatch = audio_check(track, source, index, accel)
+                if mismatch: mismatches.append(mismatch)
         except Exception as exc:   # an audio failure must not hide metadata mismatches
-            record["audio"] = {"service": ref.service, "error": str(exc)}
+            record["audio"] = {"service": ref.service if ref.preview_url else "unknown", "error": str(exc)}
     return {**record, "status": "mismatch" if mismatches else "ok", "mismatches": mismatches}
 
 

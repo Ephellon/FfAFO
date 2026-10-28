@@ -170,6 +170,6 @@ Clean and explicit versions differ only in muted words, so the BER difference wi
 3. Refactor `asfp-v2` + `best_alignment`, plus the v1 regression test.
 4. Audio check against Apple previews, then calibrate on labelled pairs.
 5. Library index cache, then a resumable full-library run. ✅ 2026-10-28: `--index-only`, `--resume`, `--index`, `--no-index`, `--progress`, `--no-numpy`; cache moved to `R:\FAFO`. Added `fafo.py` CLI (`fingerprint`, `compare`, `stats` services; files or folders) for callers such as the PyLy controller.
-6. Spotify adapter and the precedence logic.
+6. Spotify adapter and the precedence logic. ✅ 2026-10-28 (fixture-tested). Live API currently answers 403 "Active premium subscription required for the owner of the app", so the start-up check skips Spotify with a warning until the app owner has Premium.
 7. YouTube Music and SoundCloud adapters with 31 s windowed streaming.
 8. Album-level `TRACKLIST` check.

@@ -25,9 +25,9 @@ Setup: copy `.env.example` to `.env` and fill in what you use (`FAFO_DIR`, Spoti
 For each audio file under a folder:
 
 1. Reads tags and duration with `ffprobe` (title, artist, album artist, album, track/disc, duration, ISRC, explicit advisory).
-2. Finds the same song on the streaming services, in precedence order. Apple Music (iTunes Search/Lookup API, no account needed) is implemented now; Spotify, YouTube Music and SoundCloud are planned (see `PLAN.md` §8).
+2. Finds the same song on the streaming services, in precedence order: **Spotify** (Web API; used when `SPOTIFY_CLIENT_ID`/`SPOTIFY_CLIENT_SECRET` are set and the API accepts them), then **Apple Music** (iTunes Search/Lookup API, no account needed). YouTube Music and SoundCloud are planned (see `PLAN.md` §8). Spotify is checked once at start-up; if it refuses (bad credentials, or Spotify's rule that the app owner needs Premium), a `{"warning": "Spotify skipped: ..."}` line goes to stderr and Apple becomes the reference.
 3. Picks a **reference** track only when the match is confident: same ISRC, or the same normalized title inside a matching edition of the same album, or (song-search fallback) the same title and a duration within 3 s.
-4. Runs metadata checks, then an audio check: Apple's 30 s preview is streamed into memory (never saved), fingerprinted, and aligned against the library file's fingerprint.
+4. Runs metadata checks against the reference, then an audio check: Apple's 30 s preview is streamed into memory (never saved), fingerprinted, and aligned against the library file's fingerprint. Spotify has no previews, so for a Spotify reference the audio comes from Apple's confident match (the one with the same ISRC when there is one).
 5. Emits a record only when something is wrong, unless asked otherwise.
 
 ### Guarantees
@@ -35,7 +35,7 @@ For each audio file under a folder:
 - **No writes to the library.** Library files are only `stat()`ed and read by `ffprobe`/`ffmpeg`. `--report` and `--index` are refused if they point inside the scanned folder.
 - **No downloads.** Previews are streamed over HTTPS straight into memory, capped at 31 s. Only `https` URLs on `*.apple.com` / `*.mzstatic.com` are fetched, with FFmpeg's protocol whitelist set to `https,tls,tcp`.
 - **No registry writes.** `compare.py` never calls the registry.
-- **GET-only network access**, throttled to one Apple request every 3.1 s.
+- **GET-only network access**, throttled to one Apple request every 3.1 s and one Spotify request every 0.25 s. The only POST is Spotify's client-credentials token request; the secret is sent nowhere else and never logged.
 
 ### Command line: `fafo.py`
 
@@ -109,7 +109,7 @@ Cost measured on one album (17 files): fingerprinting about 1 s per track with N
 ### `compare` output contract (for calling programs)
 
 - **stdout**: one JSON object per line (UTF-8) for each emitted track: mismatches always, `ok` with `--verbose`, `unresolved` with `--show-unresolved`.
-- **stderr**: per-file `error` records (same shape), optional `--progress` lines, and a final summary line:
+- **stderr**: per-file `error` records (same shape), `{"warning": ...}` lines (e.g. Spotify skipped), optional `--progress` lines, and a final summary line:
   `{"summary": {"files": 17, "ok": 7, "mismatch": 8, "unresolved": 2, "error": 0}}` (plus `"reused": n` with `--resume`).
   With `--index-only` the summary is `{"summary": {"files": n, "indexed": n, "cached": n, "error": n}}`.
 - **Exit code**: `0` no mismatches; `1` at least one mismatch (with `--index-only`: at least one file failed); `2` invalid arguments. Per-file errors do not change the exit code of a comparison run, so read the summary's `error` count.
@@ -215,7 +215,8 @@ Tests use fake services and temporary folders; they make no network requests and
 
 ## Known limits
 
-- `compare.py` currently checks Apple Music only. Spotify (metadata reference), YouTube Music and SoundCloud (31 s audio windows) and an album track-list check are planned (`PLAN.md` §8).
+- Services: Spotify and Apple Music. YouTube Music and SoundCloud (31 s audio windows) are planned (`PLAN.md` §8).
+- Spotify only works when the developer app's owner account has Premium (Spotify policy); otherwise it is skipped automatically. Spotify's `explicit: false` is treated as unknown, because it does not distinguish a clean edition from a song without explicit lyrics.
 - Apple previews cover about 30 s (usually starting around 45 s in), so edits outside that window show up only as `DURATION`.
 - Clean and explicit versions sound almost identical to the audio check; rely on `EXPLICIT` and `ISRC` for those.
 - A renamed track on the service (for example MAYBE in the library vs FOREVER on Apple) comes back `unresolved`, not as a mismatch.

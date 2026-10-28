@@ -13,6 +13,8 @@ A file-by-file index of the public methods, important internals, configuration, 
 | FAFO CLI | `fafo.py` | Entry point: `fingerprint`, `compare` and `stats` services |
 | Version check | `compare.py` | Read-only library vs streaming-service comparison; reports mismatches as JSONL |
 | Apple adapter | `apple.py` | iTunes Search/Lookup client: album editions, song fallback, throttling |
+| Spotify adapter | `spotify.py` | Web API client (client credentials): ISRC/album/song search, metadata reference |
+| Settings | `envfile.py` | Dependency-free `.env` loader (`FAFO_DIR`, Spotify credentials) |
 | FAFO cache | `library_index.py` | SQLite cache of library fingerprints and `--resume` results (`FAFO_DIR`) |
 | Tests | `tests/` | `test_audio_sig.py`, `test_compare.py`, `test_apple.py`, `test_library_index.py` |
 
@@ -201,6 +203,15 @@ CLI options, output records, mismatch codes and exit codes are documented in `RE
   - **`find(track)`** — same-title songs from the album editions (same disc/track position first), else a song search filtered by artist.
 - **`http_get_json(url)`** — GET with one retry after 60 s on HTTP 403/429.
 - `MIN_INTERVAL = 3.1` s between requests (Apple allows about 20 per minute). `trackExplicitness`: `explicit` → True, `cleaned` → False, `notExplicit` → unknown.
+
+### `spotify.py` — Spotify adapter
+
+- **`SpotifyClient(client_id, client_secret, sleep, clock).get(url)`** — client-credentials token (POST to `TOKEN_URL`, refreshed before expiry and once on 401), bearer GET, `Retry-After` back-off on 429 (max 120 s). HTTP 403 and token failures raise **`SpotifyUnavailable`**.
+- **`SpotifyAdapter(fetch, market="US", sleep, clock)`** — `fetch` is injectable for tests. **`from_env(market)`** returns `None` without credentials. **`check()`** makes one cheap call and raises if the API is unusable.
+  - **`find(track)`** — ISRC search first when the file has an ISRC; else same-title songs from album editions (`album_match=True`, same position first); else a track search filtered by artist.
+  - **`album_tracks(track)`** — album search with artist, falling back to album-only (rescues symbol-only artists such as `¥$`), editions sorted by qualifier match then full albums before singles; at most `MAX_ALBUMS` (3); ISRCs filled from `GET /tracks` in batches of 50; cached per album.
+  - Mapping: `explicit: true` → True, `false` → unknown; no `preview_url`.
+- `compare.default_adapters()` loads `.env`, runs `check()`, and on failure prints `{"warning": "Spotify skipped: ..."}` and continues with Apple only. `compare.audio_reference()` picks the preview for a reference without one.
 
 ## 8. `library_index.py` — FAFO cache
 
