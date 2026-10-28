@@ -173,3 +173,91 @@ Clean and explicit versions differ only in muted words, so the BER difference wi
 6. Spotify adapter and the precedence logic. ✅ 2026-10-28 (fixture-tested). Live API currently answers 403 "Active premium subscription required for the owner of the app", so the start-up check skips Spotify with a warning until the app owner has Premium.
 7. YouTube Music and SoundCloud adapters with 31 s windowed streaming.
 8. Album-level `TRACKLIST` check. ✅ 2026-10-28 via MusicBrainz (`--album-checks`), plus `RELEASE_WITHDRAWN` and MusicBrainz artist aliases (Kanye West / Ye) for all services. VULTURES 2: files tagged with the withdrawn 2024-08-03 release; reference is the Official 2024-11-10 release (FOREVER missing, MAYBE extra and duplicated, 5 tracks moved).
+
+---
+
+## 9. Noted features (2026-10-28; not scheduled yet)
+
+### 9.1 `--folder-chunk`: one database per album folder
+- From each audio file, take the folder one level up (the album folder in `Artist\Album\file` layouts) and use its name as the database name: `FAFO_DIR\<album folder name>.sqlite3`, holding that folder's fingerprints and results.
+- Albums with the same name by different artists may share a database ("same name by different artists is fine").
+- **Decided (2026-10-28):**
+  - **Database file name:** the folder name, Unicode-normalized, then URL-encoded with `;` in place of `%`. For example, `Post Malone` → `Post;20Malone`. Case is kept.
+  - **Files directly in an artist folder:** they get their parent folder's name regardless, so the artist folder becomes the database.
+  - **Scope:** chunk databases are used only when `--folder-chunk` is set. Without it, everything stays in the single `library-index.sqlite3`.
+- **Decided (2026-10-28, follow-up):**
+  - **Encoding:** UTF-16 code units, exactly like JavaScript's `escape()`, with `;` in place of `%`.
+    - Code units up to `FF` become `;XX`; higher ones become `;uXXXX`. The `u` keeps the two widths unambiguous.
+    - Examples: `Post Malone` → `Post;20Malone`, `¥$` → `;A5;24`, `カニエ` → `;u30AB;u30CB;u30A8`, `a;b` → `a;3Bb`.
+    - A trailing `.` becomes `;2E`, because Windows can't create file names ending in a dot.
+  - **Migration:** the first `--folder-chunk` run copies existing entries from `library-index.sqlite3` into the chunk databases (no re-fingerprinting) and leaves the original in place.
+
+### 9.2 `--flowerbed` (rooted): roots derived from tags
+- Today the registry's 20-byte root is random (README "Known limits"). With flowerbed, the root comes from tags instead: `<artist>/<track>/<year.month>`. The album is ignored on purpose, because an artist rarely releases two songs with the same name in the same month.
+- 20 bytes fits a SHA-1 of the normalized string exactly, so the same song gets the same root on every machine without asking the registry.
+- **Decided (2026-10-28):**
+  - **Track:** the song title.
+  - **Artist:** the track artist(s), each trimmed, joined by `;`.
+  - **Source:** every value comes from the file's own metadata, never from the folder name or a service.
+  - **Normalization:** UPPERCASE, runs of whitespace reduced to one space, no spaces around punctuation.
+  - **Date:** `YYYY.MM` with a zero-padded month. A year-only date means January (`2024` → `2024.01`).
+  - **Punctuation:** spaces touching punctuation are removed and the punctuation stays: `Ty Dolla $ign , Ye` → `TY DOLLA $IGN,YE`, `Song ( Remix )` → `SONG(REMIX)` (confirmed).
+  - **Root versioning:** the proposal below was accepted.
+- **Root versioning (accepted 2026-10-28), the problem:** the registry already holds random roots. A flowerbed root is a hash of tag text, so any change to the recipe (normalization, field order, date rule) would silently give every song a new root. Old and new roots for the same song would never meet.
+- **Proposal:**
+  - Hash a versioned string: `SHA-1("flowerbed-v1\n" + "<ARTIST>/<TITLE>/<YYYY.MM>")` gives exactly 20 bytes.
+  - Store the root's scheme (`random` or `flowerbed-v1`) on each `roots` row.
+  - When a fingerprint matches an existing random-root identity, keep the existing root and record the flowerbed root as an alias, rather than replacing it.
+  - Use `ambiguous` when the audio matches one root but the tags point to another (same recording, different tags, or a tag typo). Never merge automatically.
+
+### 9.3 `xv3` (experimental): spectrum-plot signatures
+- **Goal:** near-instant whole-file signatures, like the averaged power spectrum (PSD, dB A) in checkhearing.org's Audio Plot Spectrum. That tool averages the first minute in 8,192-sample FFT frames; `xv3` averages the whole file. Reference plot: SLIDE.
+- **Status:** experimental and unsupported until real-world testing. If it is promoted, it becomes `--plot-signed`. Its signatures join parts with `$` instead of `_`, and it forces `--flowerbed`.
+- **Open research:**
+  - Pick an FFT size and band layout that ignore small changes (encode, master, loudness) but catch obvious ones (a different song, a new section in a remix or version).
+  - The vocal range to exclude, proposed as `[60 Hz, 1050 Hz]`, needs research.
+- **Working notes (2026-10-28):**
+  - **FFT size sets frequency resolution, not ambiguity.** At 44.1 kHz, 8,192 samples gives 5.4 Hz bins. Averaging the whole file already removes most frame-to-frame noise.
+  - **Ambiguity comes from the time average.** A whole-file PSD keeps no time order, so a new section only nudges the average, and two songs with the same mix style can look alike. The likely knob is the number of time segments, for example a PSD per quarter of the song or per 10 to 15 seconds, rather than the FFT size.
+  - **Compare bands, not bins.** Fold the bins into log-spaced bands (1/3 or 1/6 octave, roughly 30 to 60 bands). Subtract the mean dB so loudness doesn't count, then compare by distance.
+  - **Cap the top frequency.** SLIDE's plot falls off a cliff near 16.5 kHz, which is the MP3 encoder's lowpass. Bands above about 15 kHz would flag encoding differences, not wrong songs.
+  - **The vocal cut may remove the song's identity.** `[60 Hz, 1050 Hz]` also holds most bass, kick and chord fundamentals. Down-weighting that range may beat dropping it; to be tested.
+  - **Speed:** the cost is decoding, not the FFT. The lever is decoding to mono at a lower sample rate: 32 kHz keeps a 15 kHz cap, while 22.05 kHz forces the cap down to about 11 kHz.
+  - **Shell quoting:** `$` is valid in Windows file names, but POSIX shells expand it, so callers must single-quote `$` signatures.
+- **Built (2026-10-28), not promoted:** `spectrum_sig.py` plus the experimental `fafo.py xv3` service (`--pair A B`). `compare` does not use it.
+  - **Recipe:** mono at 32 kHz; 8,192-sample Hann frames, hop 4,096; 52 bands of 1/6 octave from 40 Hz to 15 kHz.
+  - **Whole-file plot:** mean power per band in dB, minus its mean.
+  - **Segments:** a 10-second grid, matched in any order against 10-second windows that slide every 1.25 s. Window bands are floored 40 dB below the window's loudest band; silent windows (under −60 dBFS) are skipped.
+  - **Code:** the plot minus a −5 dB/octave tilt, at 5 bits per band in 1 dB steps (±16 dB). That is 33 bytes, or 48 characters.
+- **Calibration (2026-10-28):** 60 library files, 4 from each of 15 albums.
+  - **Positives:** each file vs (a) an AAC 96 kbps re-encode, (b) a copy trimmed by 3.7 s, (c) a 30 s excerpt of the AAC copy starting at 41.3 s, like a streaming preview.
+  - **Negatives:** other tracks from the same album (the hard case) and from other albums.
+  - **Splices:** 15 s and 30 s of a same-album track inserted mid-song.
+  - Script and raw results are kept outside the repo; rounds 1–4 differ as noted below.
+- **Results:**
+  - **Speed:** 1–2 s per file to decode on this machine (reading R: alone is about 0.55 s); about 0.4 s to analyse with NumPy. Pure Python gives the same values (within 1e-13 dB) but takes about 100 s per song.
+  - **Tilt:** the library averages −5.0 dB/octave (SD 0.7). After removing it, 95% of bands sit within ±7 dB; without removing it, values reach ±50 dB.
+  - **Code rounding error:** median 0.29 dB (p95 1.05). The first 4-bit, 3 dB code without the tilt erred by about 1.9 dB, too coarse for a 1 dB threshold.
+  - **Whole-file plot distance:**
+
+    | Pair | median | p95 | max |
+    |---|---|---|---|
+    | Same song, AAC copy | 0.16 | 0.76 | 0.88 |
+    | Same song, trimmed copy | 0.08 | 0.17 | 0.24 |
+
+    Different tracks measured 1.49 (p05) / 3.62 (median) on the same album and 3.10 / 4.81 on other albums.
+    The best cutoff is 0.9–1.0 dB, but about 3% of same-album pairs fall under it. **The whole-file plot alone cannot always tell tracks from the same album apart;** the segments are needed.
+  - **Segment matching:** round 1 used a fixed grid against a fixed grid, and 7.6% of same-song segments failed to match because of time offsets. Windows sliding every 2.5 s cut that to 3.0%, sliding every 1.25 s cut it to 1.4%, and adding the 40 dB floor cut it to 1.1–1.5%. The floor fixed AAC quiet intros, where empty bass bands measured 12–15 dB apart.
+
+    | Segment cutoff | same-song files flagged (AAC / trimmed / excerpt, of 60) | same-album segments accepted | 15 s / 30 s splices caught |
+    |---|---|---|---|
+    | 1.5 dB (chosen) | 5 / 5 / 2 | 3.2% | 39/40, 40/40 |
+    | 2.0 dB | 4 / 4 / 2 | 6.0% | 37/40, 38/40 |
+    | 2.5 dB | 2 / 3 / 1 | 15.4% | 35/40, 36/40 |
+
+  - **Vocal range `[60, 1050] Hz`:** down-weighting it does not help. Weight 0.5 changes almost nothing; weight 0 makes plot separation worse (error sum 0.056 vs 0.033). The default stays at weight 1, and `--vocal-weight` remains for testing.
+- **Still open before promotion:**
+  - About 8% of same-song files get a false section flag at 1.5 dB, mostly in intros and outros.
+  - Test against real streaming previews (network); so far excerpts are cut locally.
+  - Store xv3 in the FAFO index so repeat lookups really are instant.
+  - `--plot-signed` needs `--flowerbed` (§9.2) for its root.

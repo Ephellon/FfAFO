@@ -10,7 +10,8 @@ A file-by-file index of the public methods, important internals, configuration, 
 | Folder scanner | `scan_folder.py` | Discover files, decode through FFmpeg, fingerprint, call registry |
 | Shared registry | `registry.py` | Persist fingerprints and roots in SQLite; resolve matches and aliases over HTTP |
 | Browser module | `web/audio-signature.js` | Decode an uploaded `File`, fingerprint it, call registry |
-| FAFO CLI | `fafo.py` | Entry point: `fingerprint`, `compare` and `stats` services |
+| FAFO CLI | `fafo.py` | Entry point: `fingerprint`, `compare`, `stats` and experimental `xv3` services |
+| xv3 (experimental) | `spectrum_sig.py` | Whole-file and per-segment spectrum plots, plot codes, section differences |
 | Version check | `compare.py` | Read-only library vs streaming-service comparison; reports mismatches as JSONL |
 | Apple adapter | `apple.py` | iTunes Search/Lookup client: album editions, song fallback, throttling |
 | Spotify adapter | `spotify.py` | Web API client (client credentials): ISRC/album/song search, metadata reference |
@@ -156,9 +157,10 @@ The `headers` option supports an app-managed auth flow; `fetchImpl` can be repla
 
 ## 5. `fafo.py` — service command line
 
-- **`SERVICES`** — `("fingerprint", "compare", "stats")`; `main(argv)` dispatches on the first argument (exit `2` for an unknown or missing service).
+- **`SERVICES`** — `("fingerprint", "compare", "stats", "xv3")`; `main(argv)` dispatches on the first argument (exit `2` for an unknown or missing service).
 - **`fingerprint_record(path, index, accel, with_subfps) -> dict`** — `{file, status: indexed|cached|computed, duration, asfp-v1, frames[, asfp-v2]}`.
 - **`fingerprint_main(argv, prog)`** / **`stats_main(argv, prog)`** — the `fingerprint` and `stats` services; `compare` is `compare.main(argv, prog="fafo.py compare")`.
+- **`xv3_record(path, accel, with_bands) -> (dict, Spectrum)`** / **`xv3_main(argv, prog)`** — the experimental `xv3` service: `{file, duration, xv3, segments[, bands]}` per file, or one `--pair` record `{a, b, plot_db, missing, extra, match}`.
 
 Options and output formats are in `README.md` ("Command line: `fafo.py`").
 
@@ -242,6 +244,24 @@ Tables:
 | `fingerprints` | `path` (PK), `size`, `mtime_ns`, `algorithm`, `duration`, `v1` (21-byte BLOB), `subfps` (uint32 little-endian array BLOB), `indexed_at` (ISO-8601 UTC) |
 | `results` | `path` (PK), `size`, `mtime_ns`, `options` (JSON), `record` (JSON), `checked_at` (ISO-8601 UTC) |
 
+## 8a. `spectrum_sig.py` — xv3 spectrum plots (experimental)
+
+Not used by `compare`; see `PLAN.md` §9.3 for status and calibration.
+
+- **Constants** — `RATE = 32000`, `FFT_SIZE = 8192` (Hann window, hop 4096), `LOW_HZ = 40`, `HIGH_HZ = 15000`, `BANDS_PER_OCTAVE = 6` (so `BANDS = 52`), `SEGMENT_SECONDS = 10` with match windows every `STEP_SECONDS = 1.25`, `SILENT_DBFS = -60`, `TILT_DB_PER_OCTAVE = -5` (mean-centred as `TILT`), `STEP_DB = 1` with `LEVEL_BITS = 5` (`LEVELS = 32`, `PLOT_BYTES = 33`), `PLOT_JOIN = "$"` (reserved for `--plot-signed`), and provisional `PLOT_MAX_DB` / `SECTION_MAX_DB`.
+- **`decode(path, seconds=None) -> array('f')`** — FFmpeg decode to mono float32 at `RATE`.
+- **`analyze(samples, accel=True) -> Spectrum`** — returns `Spectrum(duration, plot, segments, windows)`.
+  - `plot` is the whole file's mean power per band in dB, minus its mean; silent blocks are left out.
+  - `windows` are 10-second spans that start every `STEP_SECONDS`; `None` marks a silent one. A tail window shorter than half a segment is dropped unless it is the only one.
+  - Each window sums only the frames lying wholly inside it; prefix sums keep that cheap.
+  - Window bands more than `FLOOR_DB = 40` below the window's loudest band are raised to that floor: encoders fill near-empty bands with noise, which otherwise flagged quiet intros. The whole-file `plot` is not floored.
+  - `segments` are every eighth window: the fixed 10-second grid.
+  - NumPy and pure Python agree to about 1e-13 dB.
+- **`encode_plot(plot) -> str`** / **`decode_plot(text) -> list[float]`** — 5 bits per band, in `STEP_DB` steps around `TILT`, clamped to ±16 dB, bit-packed big-endian into `PLOT_BYTES`, then base-49 (48 characters).
+- **`band_weights(vocal_weight=1.0, low_hz=60, high_hz=1050)`** — per-band weights for `distance`.
+- **`distance(a, b, weights=None) -> float`** — weighted RMS dB difference, each plot re-centred on its weighted mean.
+- **`unmatched(a, b, max_db, weights)`** / **`section_diff(a, b, max_db, weights) -> {missing, extra}`** — each loud grid segment of one file is matched against every loud sliding window of the other, in any order; spans are in seconds.
+
 ## 9. `tests/` — coverage
 
 Run with:
@@ -254,7 +274,8 @@ python -m unittest discover -s tests -v
 - `test_compare.py` — ffprobe parsing, title normalization, mismatch rules, precedence, audio check (mocked), preview URL guard, CLI (temp library left untouched, `--report`/`--index` refused inside the folder, `--resume`, `--index-only`).
 - `test_apple.py` — adapter against recorded-style fake API responses (editions, artist filter, throttling).
 - `test_library_index.py` — cache hits, invalidation on change, results keyed by options, lazy creation.
-- `test_fafo.py` — `fingerprint` (indexed then cached, single file, `--subfingerprints`, `--quiet`, `--no-index`, errors, refusals), `compare` delegation, `stats`, help and unknown services.
+- `test_fafo.py` — `fingerprint` (indexed then cached, single file, `--subfingerprints`, `--quiet`, `--no-index`, errors, refusals), `compare` delegation, `stats`, `xv3` (listing writes nothing, `--pair` match and added section), help and unknown services.
+- `test_spectrum_sig.py` — xv3 band layout and tilt, loudness independence, plot-code round trip and clamping, NumPy parity, added/missing sections, offset excerpts, window floor, silent segments, rejections, vocal weights.
 
 No test uses the network or the real library. These are unit tests, **not** proof of perceptual matching quality or full Python/JavaScript equivalence; calibration data is in `PLAN.md` §2.2.
 

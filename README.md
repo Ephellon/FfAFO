@@ -49,6 +49,7 @@ Artist names match on whole words ("Ye" does not match inside "Kanye"); when tha
 | `fingerprint PATH...` | Fingerprints audio files/folders into the FAFO index and prints each file's fingerprint | none |
 | `compare PATH...` | Compares files/folders with the streaming services and reports mismatches | Apple Music |
 | `stats` | Prints what the FAFO index holds (counts, size, last indexed, stored results by status) | none |
+| `xv3 PATH...` | **Experimental.** Spectrum-plot signatures; `--pair A B` compares two files (see below) | none |
 
 `PATH` can be any mix of folders (scanned recursively for `.wav .mp3 .m4a .aac .flac .ogg .opus .wma .aiff .aif .mp4 .webm`) and single audio files. `python fafo.py <service> --help` lists options. `python compare.py ...` is the same as `python fafo.py compare ...`.
 
@@ -99,6 +100,29 @@ One JSON line per file on stdout:
 | `--progress` | Print `[n/total] path` per file to stderr |
 | `--album-checks` | After the per-file pass, emit one record per album folder (TRACKLIST, RELEASE_WITHDRAWN) |
 | `--no-musicbrainz` | No MusicBrainz requests: no artist aliases and no album checks |
+
+#### `xv3` (experimental): spectrum-plot signatures
+
+Not used by `compare`, and its thresholds are provisional until real-world testing is done (`PLAN.md` §9.3). Each file is decoded once, mono at 32 kHz. The whole file is averaged into a power spectrum, like an audio spectrum plot: 52 bands of 1/6 octave from 40 Hz to 15 kHz, in dB relative to the file's own mean, so loudness does not count. A spectrum is also kept for each 10-second segment, so a section added or missing in one file shows up even when the whole-file average barely moves. Segments are compared with 10-second windows of the other file that slide in 1.25-second steps, so a time offset between the two files does not count. Bands more than 40 dB below a segment's loudest band count as empty, so encoder noise in quiet intros does not count either. Nothing is cached or written.
+
+| Option | Effect |
+|---|---|
+| `--pair A B` | Compare exactly two files instead of listing signatures |
+| `--plot-db N` | `--pair`: largest whole-file plot distance (RMS dB) still called the same song |
+| `--section-db N` | `--pair`: largest segment distance still called the same section |
+| `--vocal-weight W` | Weight of bands centred in 60–1050 Hz (`0` ignores them; default `1`) |
+| `--bands` | Include the unquantized plot (`bands`: 52 dB values) |
+| `--no-numpy` | Methodical mode: pure-Python FFT (same output, much slower) |
+| `--progress` | Print `[n/total] path` per file to stderr |
+
+Without `--pair`, there is one line per file. The `xv3` value is the plot stored as its difference from a typical music slope (−5 dB per octave), in 1 dB steps within ±16 dB. That is 5 bits per band: 33 bytes, or 48 characters in the signature alphabet, with about 0.3 dB of rounding error.
+
+```json
+{"file": "R:\\Local\\Doechii\\Alligator Bites Never Heal\\16 SLIDE.mp3", "duration": 174.289,
+ "xv3": "3ckNaxd47ERAR6LnHfAMEt6mygYEjKke4MaJJC7RppjEn4bi", "segments": 17}
+```
+
+With `--pair`, one line: `{"a": {...}, "b": {...}, "plot_db": 0.84, "missing": [[start, end], ...], "extra": [[start, end], ...], "match": true}`. `missing` lists sections of `A` (in seconds) heard nowhere in `B`; `extra` lists sections of `B` heard nowhere in `A`. Exit code: `0` match, `1` no match or a failed file, `2` invalid arguments. Segments are matched without regard to order, so padding and edits do not count as differences; silent segments are skipped.
 
 ### FAFO cache (Fast-Fourier Audio Fingerprinting Offline)
 

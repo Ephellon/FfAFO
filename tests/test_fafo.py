@@ -3,6 +3,7 @@ from pathlib import Path
 from unittest import mock
 import fafo, library_index
 from test_audio_sig import synth
+from test_spectrum_sig import tones
 
 
 class FafoCliTests(unittest.TestCase):
@@ -94,6 +95,35 @@ class FafoCliTests(unittest.TestCase):
         self.assertEqual(codes, (0, 2, 2))
         self.assertIn("fafo.py fingerprint", out.getvalue())
         self.assertIn("Unknown service 'download'", err.getvalue())
+
+    def xv3_audio(self, by_name):
+        patch = mock.patch.object(fafo.spectrum_sig, "decode", side_effect=lambda p: by_name[Path(p).name])
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def test_xv3_signs_every_file_and_writes_nothing(self):
+        song = tones(12, (110, 220, 330))
+        self.xv3_audio({"01 One.mp3": song, "02 Two.flac": song})
+        before = self.snapshot()
+        code, records, _ = self.run_cli("xv3", str(self.library), "--bands")
+        self.assertEqual(code, 0)
+        self.assertEqual([Path(r["file"]).name for r in records], ["01 One.mp3", "02 Two.flac"])
+        self.assertEqual(records[0]["xv3"], records[1]["xv3"])
+        self.assertEqual((records[0]["segments"], len(records[0]["bands"])), (1, 52))
+        self.assertEqual(self.snapshot(), before)
+        self.assertFalse((self.root / "FAFO").exists())
+
+    def test_xv3_pair_reports_added_sections(self):
+        song = tones(20, (110, 220, 330))
+        a, b = self.library / "01 One.mp3", self.library / "02 Two.flac"
+        self.xv3_audio({a.name: song, b.name: song})
+        code, [record], _ = self.run_cli("xv3", "--pair", str(a), str(b))
+        self.assertEqual((code, record["match"], record["plot_db"]), (0, True, 0.0))
+        self.xv3_audio({a.name: song, b.name: song + tones(10, (2500, 5000, 9000))})
+        code, [record], _ = self.run_cli("xv3", "--pair", str(a), str(b))
+        self.assertEqual((code, record["match"], record["missing"], record["extra"]), (1, False, [], [[20, 30.0]]))
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            self.run_cli("xv3", "--pair", str(a))
 
 
 if __name__ == "__main__": unittest.main()

@@ -3,6 +3,7 @@
   python fafo.py fingerprint PATH...   fingerprint audio files/folders into the FAFO index (no network)
   python fafo.py compare PATH...       compare against streaming services; reports mismatches only
   python fafo.py stats                 show what the FAFO index holds
+  python fafo.py xv3 PATH...           EXPERIMENTAL spectrum-plot signatures (--pair A B compares two files)
 
 Every service reads the library only. Output is JSON Lines on stdout; errors, progress and a
 summary line go to stderr. Run `python fafo.py <service> --help` for options.
@@ -10,12 +11,12 @@ summary line go to stderr. Run `python fafo.py <service> --help` for options.
 from __future__ import annotations
 import argparse, json, sys
 from pathlib import Path
-import compare
+import compare, spectrum_sig
 from audio_sig import ALGORITHM_V2, ALGORITHM_VERSION, analyze, encode_bytes
 from library_index import INDEX_PATH, LibraryIndex
 from scan_folder import decode_audio
 
-SERVICES = ("fingerprint", "compare", "stats")
+SERVICES = ("fingerprint", "compare", "stats", "xv3")
 
 
 def _utf8_streams() -> None:
@@ -90,6 +91,58 @@ def stats_main(argv: list[str], prog: str) -> int:
     return 0
 
 
+def xv3_record(path: Path, accel: bool, with_bands: bool) -> tuple[dict, spectrum_sig.Spectrum]:
+    spectrum = spectrum_sig.analyze(spectrum_sig.decode(path), accel=accel)
+    record = {"file": str(path), "duration": round(spectrum.duration, 3),
+              spectrum_sig.ALGORITHM: spectrum_sig.encode_plot(spectrum.plot),
+              "segments": sum(seg is not None for seg in spectrum.segments)}
+    if with_bands:
+        record["bands"] = [round(x, 2) for x in spectrum.plot]
+    return record, spectrum
+
+
+def xv3_main(argv: list[str], prog: str) -> int:
+    ap = argparse.ArgumentParser(prog=prog, description="EXPERIMENTAL spectrum-plot signatures (xv3). Reads audio only: "
+                                 "no index, no network. Thresholds are provisional (PLAN.md §9.3).")
+    ap.add_argument("paths", nargs="+", type=Path, metavar="path", help="Audio file(s)/folder(s); exactly two files with --pair")
+    ap.add_argument("--pair", action="store_true", help="Compare two files: plot distance and sections heard in only one")
+    ap.add_argument("--plot-db", type=float, default=spectrum_sig.PLOT_MAX_DB,
+                    help=f"--pair: largest plot distance still called the same song (default {spectrum_sig.PLOT_MAX_DB})")
+    ap.add_argument("--section-db", type=float, default=spectrum_sig.SECTION_MAX_DB,
+                    help=f"--pair: largest segment distance still called the same section (default {spectrum_sig.SECTION_MAX_DB})")
+    ap.add_argument("--vocal-weight", type=float, default=1.0, help="Weight of bands centred in 60-1050 Hz (0 ignores them)")
+    ap.add_argument("--bands", action="store_true", help="Include the unquantized plot (dB per band, relative to its mean)")
+    ap.add_argument("--no-numpy", action="store_true", help="Methodical mode: pure-Python FFT (much slower, same output)")
+    ap.add_argument("--progress", action="store_true", help="Print [n/total] per file to stderr")
+    args = ap.parse_args(argv)
+    _utf8_streams()
+    weights = spectrum_sig.band_weights(args.vocal_weight)
+    if args.pair:
+        if len(args.paths) != 2 or not all(p.is_file() for p in args.paths):
+            ap.error("--pair takes exactly two audio files")
+        (ra, a), (rb, b) = (xv3_record(p, not args.no_numpy, args.bands) for p in args.paths)
+        plot_db = spectrum_sig.distance(a.plot, b.plot, weights)
+        sections = spectrum_sig.section_diff(a, b, args.section_db, weights)
+        record = {"a": ra, "b": rb, "plot_db": round(plot_db, 2), **sections,
+                  "match": plot_db <= args.plot_db and not sections["missing"] and not sections["extra"]}
+        print(json.dumps(record, ensure_ascii=False))
+        return 0 if record["match"] else 1
+    try:
+        files, _ = compare.collect_files(args.paths)
+    except ValueError as exc:
+        ap.error(str(exc))
+    errors = 0
+    for n, path in enumerate(files, 1):
+        if args.progress: print(f"[{n}/{len(files)}] {path}", file=sys.stderr, flush=True)
+        try:
+            print(json.dumps(xv3_record(path, not args.no_numpy, args.bands)[0], ensure_ascii=False), flush=True)
+        except Exception as exc:
+            errors += 1
+            print(json.dumps({"file": str(path), "status": "error", "error": str(exc)}, ensure_ascii=False), file=sys.stderr)
+    print(json.dumps({"summary": {"files": len(files), "error": errors}}), file=sys.stderr)
+    return 1 if errors else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if argv[:1] in (["-h"], ["--help"]):
@@ -104,6 +157,8 @@ def main(argv: list[str] | None = None) -> int:
         return fingerprint_main(rest, prog)
     if service == "compare":
         return compare.main(rest, prog=prog)
+    if service == "xv3":
+        return xv3_main(rest, prog)
     return stats_main(rest, prog)
 
 
