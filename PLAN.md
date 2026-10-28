@@ -172,4 +172,4 @@ Clean and explicit versions differ only in muted words, so the BER difference wi
 5. Library index cache, then a resumable full-library run. ✅ 2026-10-28: `--index-only`, `--resume`, `--index`, `--no-index`, `--progress`, `--no-numpy`; cache moved to `R:\FAFO`. Added `fafo.py` CLI (`fingerprint`, `compare`, `stats` services; files or folders) for callers such as the PyLy controller.
 6. Spotify adapter and the precedence logic. ✅ 2026-10-28 (fixture-tested). Live API currently answers 403 "Active premium subscription required for the owner of the app", so the start-up check skips Spotify with a warning until the app owner has Premium.
 7. YouTube Music and SoundCloud adapters with 31 s windowed streaming.
-8. Album-level `TRACKLIST` check.
+8. Album-level `TRACKLIST` check. ✅ 2026-10-28 via MusicBrainz (`--album-checks`), plus `RELEASE_WITHDRAWN` and MusicBrainz artist aliases (Kanye West / Ye) for all services. VULTURES 2: files tagged with the withdrawn 2024-08-03 release; reference is the Official 2024-11-10 release (FOREVER missing, MAYBE extra and duplicated, 5 tracks moved).

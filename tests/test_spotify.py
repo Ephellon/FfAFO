@@ -52,7 +52,7 @@ class SpotifyAdapterTests(unittest.TestCase):
     def test_album_match_with_isrc_from_full_tracks(self):
         api = FakeApi([OTHER, SINGLE, ALBUM], {"A1": [sp_track("t1", "Song", 1, explicit=True), sp_track("t2", "Other", 2)],
                                               "S1": [sp_track("s1", "Song", 1)]})
-        found = adapter(api).find(lib(title="Song", album="Album", track=1))
+        found = adapter(api).find(lib(title="Song", album="Album", album_artist="Artist", track=1))
         self.assertEqual([s.id for s in found], ["t1", "s1"])                 # full album before single; other artist dropped
         self.assertEqual((found[0].service, found[0].album_match, found[0].isrc, found[0].duration),
                          ("spotify", True, "USABC2400001", 200.0))
@@ -63,9 +63,9 @@ class SpotifyAdapterTests(unittest.TestCase):
     def test_album_cached_and_deluxe_preferred(self):
         api = FakeApi([ALBUM, DELUXE], {"A1": [sp_track("t1", "Song", 1)], "A2": [sp_track("d1", "Song", 1)]})
         sp = adapter(api)
-        self.assertEqual(sp.find(lib(title="Song", album="Album (Deluxe)"))[0].id, "d1")
+        self.assertEqual(sp.find(lib(title="Song", album="Album (Deluxe)", album_artist="Artist"))[0].id, "d1")
         before = len(api.calls)
-        sp.find(lib(title="Other", album="Album (Deluxe)"))
+        sp.find(lib(title="Other", album="Album (Deluxe)", album_artist="Artist"))
         self.assertFalse(any(p.endswith(("/A1/tracks", "/A2/tracks")) for p, _ in api.calls[before:]))
 
     def test_symbol_artist_falls_back_to_album_only_query(self):

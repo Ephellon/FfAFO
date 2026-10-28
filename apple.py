@@ -2,6 +2,7 @@
 from __future__ import annotations
 import json, time, urllib.error, urllib.parse, urllib.request
 from typing import Callable
+from artists import artist_match as _artist_match
 from compare import LibraryTrack, ServiceTrack, normalize_title
 
 SEARCH_URL = "https://itunes.apple.com/search"
@@ -23,11 +24,6 @@ def http_get_json(url: str) -> dict:
                 continue
             raise
     raise RuntimeError("unreachable")
-
-
-def _artist_match(library_artist: str, service_artist: str) -> bool:
-    a, b = library_artist.casefold().strip(), service_artist.casefold()
-    return bool(a) and (a in b or b in a)
 
 
 class AppleAdapter:

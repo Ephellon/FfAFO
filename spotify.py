@@ -7,7 +7,7 @@ ever sent to the token endpoint; catalogue calls are GET with a short-lived bear
 from __future__ import annotations
 import base64, json, os, time, urllib.error, urllib.parse, urllib.request
 from typing import Callable
-from apple import _artist_match
+from artists import artist_match as _artist_match
 from compare import LibraryTrack, ServiceTrack, normalize_title
 
 TOKEN_URL = "https://accounts.spotify.com/api/token"

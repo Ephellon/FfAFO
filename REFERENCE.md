@@ -14,7 +14,9 @@ A file-by-file index of the public methods, important internals, configuration, 
 | Version check | `compare.py` | Read-only library vs streaming-service comparison; reports mismatches as JSONL |
 | Apple adapter | `apple.py` | iTunes Search/Lookup client: album editions, song fallback, throttling |
 | Spotify adapter | `spotify.py` | Web API client (client credentials): ISRC/album/song search, metadata reference |
-| Settings | `envfile.py` | Dependency-free `.env` loader (`FAFO_DIR`, Spotify credentials) |
+| Settings | `envfile.py` | Dependency-free `.env` loader (`FAFO_DIR`, Spotify credentials, MusicBrainz contact) |
+| MusicBrainz | `musicbrainz.py` | Cached, throttled client: artist aliases, reference releases for album checks |
+| Artist matching | `artists.py` | Whole-word artist matching with an optional alias source |
 | FAFO cache | `library_index.py` | SQLite cache of library fingerprints and `--resume` results (`FAFO_DIR`) |
 | Tests | `tests/` | `test_audio_sig.py`, `test_compare.py`, `test_apple.py`, `test_library_index.py` |
 
@@ -212,6 +214,15 @@ CLI options, output records, mismatch codes and exit codes are documented in `RE
   - **`album_tracks(track)`** — album search with artist, falling back to album-only (rescues symbol-only artists such as `¥$`), editions sorted by qualifier match then full albums before singles; at most `MAX_ALBUMS` (3); ISRCs filled from `GET /tracks` in batches of 50; cached per album.
   - Mapping: `explicit: true` → True, `false` → unknown; no `preview_url`.
 - `compare.default_adapters()` loads `.env`, runs `check()`, and on failure prints `{"warning": "Spotify skipped: ..."}` and continues with Apple only. `compare.audio_reference()` picks the preview for a reference without one.
+
+### `musicbrainz.py` and `artists.py` — aliases and album checks
+
+- **`MusicBrainz(cache_path=None, fetch, sleep, clock, now)`** — GETs `https://musicbrainz.org/ws/2/...` at most once per 1.1 s with User-Agent `AudioSignatureFFT/1.0 ( MUSICBRAINZ_CONTACT )`; retries 503 with back-off; caches responses in memory and, with `cache_path`, in SQLite table `responses(url PK, body JSON, fetched_at unix time)` for 30 days.
+  - **`artist_names(name) -> frozenset[str]`** — casefolded names and aliases of artists whose name or alias is exactly `name` (search hits like tribute bands are ignored).
+  - **`release_group_id(track)`** — from `mb_release_group_id`, else via `mb_album_id`, else a release search (title, edition qualifiers, alias-aware artist credit).
+  - **`reference_release(track)`** — latest Official worldwide (XW/XE) release in the group, with recordings.
+- **`artists.artist_match(library, service)`** — whole-word containment either way, then alias equality against each credited name (credits split on `,` `&` `feat.` `x` …). **`set_alias_source(fn)`** installs the lookup; `compare.default_adapters(country, musicbrainz)` does so. Alias failures count as no match.
+- **`compare.tracklist_check(tracks, release)`** / **`album_check(tracks, musicbrainz)`** / **`_album_pass`** — album records (`TRACKLIST`, `RELEASE_WITHDRAWN`); groups are folder + album artist + album. `LibraryTrack` carries `mb_album_id`, `mb_release_group_id`, `mb_album_status` from Picard-style tags.
 
 ## 8. `library_index.py` — FAFO cache
 

@@ -28,7 +28,10 @@ For each audio file under a folder:
 2. Finds the same song on the streaming services, in precedence order: **Spotify** (Web API; used when `SPOTIFY_CLIENT_ID`/`SPOTIFY_CLIENT_SECRET` are set and the API accepts them), then **Apple Music** (iTunes Search/Lookup API, no account needed). YouTube Music and SoundCloud are planned (see `PLAN.md` §8). Spotify is checked once at start-up; if it refuses (bad credentials, or Spotify's rule that the app owner needs Premium), a `{"warning": "Spotify skipped: ..."}` line goes to stderr and Apple becomes the reference.
 3. Picks a **reference** track only when the match is confident: same ISRC, or the same normalized title inside a matching edition of the same album, or (song-search fallback) the same title and a duration within 3 s.
 4. Runs metadata checks against the reference, then an audio check: Apple's 30 s preview is streamed into memory (never saved), fingerprinted, and aligned against the library file's fingerprint. Spotify has no previews, so for a Spotify reference the audio comes from Apple's confident match (the one with the same ISRC when there is one).
-5. Emits a record only when something is wrong, unless asked otherwise.
+5. With `--album-checks`, compares each album folder with **MusicBrainz**: the reference is the latest Official worldwide release in the album's release group (found from the files' MusicBrainz tags, else by search).
+6. Emits a record only when something is wrong, unless asked otherwise.
+
+Artist names match on whole words ("Ye" does not match inside "Kanye"); when that fails, MusicBrainz artist names and aliases are tried, so `Kanye West` matches a service credit of `Ye`. MusicBrainz responses are cached for 30 days in `FAFO_DIR\musicbrainz-cache.sqlite3` (1 request per second, as MusicBrainz requires). `--no-musicbrainz` turns all of this off.
 
 ### Guarantees
 
@@ -94,6 +97,8 @@ One JSON line per file on stdout:
 | `--resume` | Store each file's result in the cache; later `--resume` runs reuse it for unchanged files under the same options, with no network access. Omit it to force a fresh check |
 | `--no-numpy` | "Methodical" mode: pure-Python FFT for new fingerprints (same output, about 30× slower) |
 | `--progress` | Print `[n/total] path` per file to stderr |
+| `--album-checks` | After the per-file pass, emit one record per album folder (TRACKLIST, RELEASE_WITHDRAWN) |
+| `--no-musicbrainz` | No MusicBrainz requests: no artist aliases and no album checks |
 
 ### FAFO cache (Fast-Fourier Audio Fingerprinting Offline)
 
@@ -134,6 +139,23 @@ Record shape (`status` is `mismatch`, `ok`, `unresolved` or `error`):
 | `EXPLICIT` | Explicit/clean flag differs (only when both are known) | `library`, `service` (booleans) |
 | `TITLE_VERSION` | Title version qualifiers differ (remaster, live, remix, edit, clean, deluxe, …) | `library`, `service` (sorted lists) |
 | `AUDIO` | The preview does not match the library audio (BER above 0.40) | `service`, `ber`, `threshold` |
+
+**Album records** (`--album-checks`) have `album`, `artist`, `folder` instead of `file`, a `musicbrainz` reference with `status` and `date`, and the same `status` values. The summary gains `"albums": {"ok", "mismatch", "unresolved", "error"}`, and an album mismatch also makes the exit code `1`.
+
+```json
+{"album": "VULTURES 2", "artist": "¥$", "folder": "R:\\Local\\¥$\\VULTURES 2",
+ "reference": {"service": "musicbrainz", "id": "efda4d75-…", "url": "https://musicbrainz.org/release/efda4d75-…", "status": "Official", "date": "2024-11-10"},
+ "status": "mismatch",
+ "mismatches": [{"code": "RELEASE_WITHDRAWN", "library": "3cc48778-…", "service": "efda4d75-…"},
+                {"code": "TRACKLIST", "library_count": 17, "service_count": 16, "missing": ["1-12 FOREVER"],
+                 "extra": ["09 MAYBE.mp3", "09 MAYBE.mp4"], "duplicates": ["MAYBE"],
+                 "moved": [{"title": "530", "library": "1-12", "service": "1-7"}]}]}
+```
+
+| Album `code` | Meaning | Extra fields |
+|---|---|---|
+| `RELEASE_WITHDRAWN` | The files are tagged with a MusicBrainz release marked withdrawn, and an Official release replaces it | `library`, `service` (release ids) |
+| `TRACKLIST` | Track count, titles or order differ from the reference release | `library_count`, `service_count`, `missing` (`disc-track title`), `extra` (file names), `duplicates` (titles), `moved` (`title`, `library`, `service` positions) |
 
 How to read them: `AUDIO` means a different recording or the wrong song. `DURATION` without `AUDIO` means the same recording edited differently (an extended, cut or alternate version), because the preview only covers about 30 s. Unknown values (no ISRC tag, no explicit flag) are never reported as mismatches.
 
@@ -219,6 +241,7 @@ Tests use fake services and temporary folders; they make no network requests and
 - Spotify only works when the developer app's owner account has Premium (Spotify policy); otherwise it is skipped automatically. Spotify's `explicit: false` is treated as unknown, because it does not distinguish a clean edition from a song without explicit lyrics.
 - Apple previews cover about 30 s (usually starting around 45 s in), so edits outside that window show up only as `DURATION`.
 - Clean and explicit versions sound almost identical to the audio check; rely on `EXPLICIT` and `ISRC` for those.
-- A renamed track on the service (for example MAYBE in the library vs FOREVER on Apple) comes back `unresolved`, not as a mismatch.
+- A renamed track on the service (for example MAYBE in the library vs FOREVER on Apple) comes back `unresolved` per file; with `--album-checks` it shows up in the album's `TRACKLIST` as missing + extra.
+- Album checks compare with MusicBrainz's newest Official worldwide release; if MusicBrainz lacks the album or its newest edition, the album is `unresolved` or compared with an older edition.
 - `--resume` reuses stored results without re-asking the service, so catalogue changes since the stored run are not seen. Run without `--resume` for a fresh check.
 - Registry: the root is a random registry-issued identity, not a content-derived hash; all clients must consult the same registry. Threshold 24 is an initial heuristic. The standard-library HTTP server is suitable for local development only.
