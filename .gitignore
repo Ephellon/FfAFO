@@ -1,0 +1,40 @@
+# Secrets: copy .env.example to .env locally; never commit real credentials
+.env
+.env.*
+!.env.example
+
+# Databases and caches (registry DB, FAFO fingerprint index, SQLite side files)
+*.sqlite
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
+FAFO/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Personal media, scan results, reports and logs
+*.mp3
+*.m4a
+*.mp4
+*.aac
+*.flac
+*.wav
+*.ogg
+*.opus
+*.wma
+*.aiff
+*.aif
+*.webm
+*.jsonl
+*.log
+
+# Local tool and editor settings
+.claude/settings.local.json
+.vscode/
+.idea/
+.venv/
+venv/
+Thumbs.db
+.DS_Store
