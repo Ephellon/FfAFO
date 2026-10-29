@@ -261,11 +261,25 @@ Clean and explicit versions differ only in muted words, so the BER difference wi
     | 2.5 dB | 2 / 3 / 1 | 15.4% | 35/40, 36/40 |
 
   - **Vocal range `[60, 1050] Hz`:** down-weighting it does not help. Weight 0.5 changes almost nothing; weight 0 makes plot separation worse (error sum 0.056 vs 0.033). The default stays at weight 1, and `--vocal-weight` remains for testing.
+- **Round 5 (2026-10-28): quiet-edge trim.** Operator ruling: below a noise threshold, edges are trimmed, at most 10 s. Built as `TRIM_DB` under the file's loud level (90th percentile of 1.25 s block levels); quiet blocks at either end leave the segment grid, while every window stays a match candidate. Same 60 files (seed 7):
+
+    | `trim_db` | files trimmed | mean trim | same-song flagged at 1.5 dB (AAC / trimmed / excerpt) | same-album segments accepted | splices caught |
+    |---|---|---|---|---|---|
+    | off | 0 | 0 s | 5 / 5 / 2 (12 of 180) | 3.2% | 39/40, 40/40 |
+    | 15 dB | 49 | 6.0 s | 4 / 1 / 2 | 3.2% | 39/40, 40/40 |
+    | **20 dB (chosen)** | 45 | 3.8 s | **4 / 0 / 2 (6 of 180)** | 3.2% | 39/40, 40/40 |
+    | 25 dB | 40 | 3.0 s | 4 / 0 / 2 | 3.2% | 39/40, 40/40 |
+    | 30 dB | 38 | 2.3 s | 4 / 1 / 2 | 3.2% | 39/40, 40/40 |
+
+    Trimming halves the false flags and costs nothing in detection; the whole-file plot is unchanged (AAC max 0.88 dB, same-album p05 1.49 dB). Of the 6 left, 4 are two `.mp4` files (`01 SELF MADE`, `05 GET MONEY BROS`) flagged in both their AAC copy and excerpt, so the remaining errors belong to a few specific files rather than being spread across the library.
+- **Real Apple previews (2026-10-28):** 45 random library files (seed 11), each with another track from its own album. 36 had a confident Apple match with a preview; the preview was streamed into memory (31 s cap), with asfp-v2 BER as ground truth.
+  - **At 1.5 dB:** 34/35 same-recording previews were fully heard in their track; 35/36 were rejected by the other track. **At 2.0 dB:** 35/35 heard. No Apple preview needed trimming (their fades are short), so trimming did not change these numbers.
+  - **The one v2 mismatch was flagged by xv3 too:** `Avenged Sevenfold\The Stage\01 Dose (CD 02).mp3`, BER 0.485. Its Apple preview sits 0.33–0.61 dB from a *different* file in that folder and 2.5–3.2 dB from its own, so the file likely holds another track's audio. This is a real wrong-song candidate for PyLy.
+- **Also built:** spectra cached in the FAFO index (`spectra` table, keyed by `RECIPE`); `--plot-signed` = `<plot>-<flowerbed root>` (operator: `-`, not `$`).
 - **Still open before promotion:**
-  - About 8% of same-song files get a false section flag at 1.5 dB, mostly in intros and outros.
-  - Test against real streaming previews (network); so far excerpts are cut locally.
-  - Store xv3 in the FAFO index so repeat lookups really are instant.
-  - `--plot-signed` needs `--flowerbed` (§9.2) for its root.
+  - The two `.mp4` files above: find out why their re-encodes drift (an odd stream or mix).
+  - Use in `compare`: an `xv3` check of the Apple preview beside the v2 BER. The previews say 1.5 dB is safe, but a second opinion on the 0.40 BER edge cases needs its own calibration.
+  - Re-measure on YouTube Music and SoundCloud windows once step 7 lands.
 
 ---
 
