@@ -4,6 +4,7 @@ import argparse, json, os, secrets, sqlite3, time
 from contextlib import closing
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, unquote
+import flowerbed as flowerbed_mod
 from audio_sig import (ALGORITHM_VERSION, ALPHABET, PERCEPTUAL_BYTES, ROOT_BYTES,
                        decode_bytes, encode_bytes, encode_signature, hamming_distance)
 
@@ -28,8 +29,45 @@ def connect(db_path: str) -> sqlite3.Connection:
         duration REAL, rms REAL, source TEXT NOT NULL DEFAULT ''
       );
       CREATE INDEX IF NOT EXISTS fingerprints_root_idx ON fingerprints(root);
+      CREATE TABLE IF NOT EXISTS root_aliases (
+        alias TEXT PRIMARY KEY, root TEXT NOT NULL REFERENCES roots(root),
+        scheme TEXT NOT NULL, created_at REAL NOT NULL
+      );
     """)
+    if "scheme" not in {row["name"] for row in db.execute("PRAGMA table_info(roots)")}:
+        db.execute(f"ALTER TABLE roots ADD COLUMN scheme TEXT NOT NULL DEFAULT '{flowerbed_mod.RANDOM}'")
+        db.commit()
     return db
+
+
+def canonical_root(db: sqlite3.Connection, root_text: str) -> str | None:
+    """The root itself if registered, the root it is an alias of, or None."""
+    if db.execute("SELECT 1 FROM roots WHERE root=?", (root_text,)).fetchone():
+        return root_text
+    row = db.execute("SELECT root FROM root_aliases WHERE alias=?", (root_text,)).fetchone()
+    return row["root"] if row else None
+
+
+def _tags_agree(db: sqlite3.Connection, audio_root: str, tag_root: str | None) -> bool:
+    """Flowerbed rule (PLAN.md §9.2): may audio-matched `audio_root` take the tags' root? Records an alias when
+    it is new and `audio_root` was issued at random; never merges two existing identities."""
+    if tag_root is None:
+        return True
+    known = canonical_root(db, tag_root)
+    if known is not None:
+        return known == audio_root
+    scheme = db.execute("SELECT scheme FROM roots WHERE root=?", (audio_root,)).fetchone()["scheme"]
+    if scheme != flowerbed_mod.RANDOM:
+        return False    # same audio already rooted under different tags
+    db.execute("INSERT INTO root_aliases(alias,root,scheme,created_at) VALUES(?,?,?,?)",
+               (tag_root, audio_root, flowerbed_mod.SCHEME, time.time()))
+    return True
+
+
+def _tag_conflict(db: sqlite3.Connection, perceptual_text: str, audio_root: str, distance: int, tag_root: str) -> dict:
+    return {"status": "ambiguous", "reason": "tags", "perceptual": perceptual_text, "algorithm": ALGORITHM_VERSION,
+            "candidates": [{"root": audio_root, "via": "audio", "distance": distance},
+                           {"root": canonical_root(db, tag_root) or tag_root, "via": "tags"}]}
 
 
 def new_root() -> tuple[bytes, str]:
@@ -37,7 +75,18 @@ def new_root() -> tuple[bytes, str]:
     return raw, encode_bytes(raw)
 
 
-def resolve(db: sqlite3.Connection, perceptual_text: str, duration=None, rms=None, source="") -> dict:
+def resolve(db: sqlite3.Connection, perceptual_text: str, duration=None, rms=None, source="", flowerbed=None) -> dict:
+    """`flowerbed`: the root text the file's tags give (flowerbed.root_text), or None for random roots."""
+    try:
+        return _resolve(db, perceptual_text, duration, rms, source, flowerbed)
+    finally:
+        if db.in_transaction:   # ambiguous and error paths write nothing
+            db.rollback()
+
+
+def _resolve(db: sqlite3.Connection, perceptual_text: str, duration, rms, source, flowerbed) -> dict:
+    if flowerbed is not None and encode_bytes(decode_bytes(flowerbed, ROOT_BYTES)) != flowerbed:
+        raise ValueError("Flowerbed root encoding is not canonical")
     # Serialize matching and root creation to avoid duplicate identities under concurrency.
     db.execute("BEGIN IMMEDIATE")
     fp = decode_bytes(perceptual_text, PERCEPTUAL_BYTES)
@@ -45,6 +94,9 @@ def resolve(db: sqlite3.Connection, perceptual_text: str, duration=None, rms=Non
         raise ValueError("Fingerprint encoding is not canonical")
     existing = db.execute("SELECT * FROM fingerprints WHERE perceptual=?", (perceptual_text,)).fetchone()
     if existing:
+        if not _tags_agree(db, existing["root"], flowerbed):
+            return _tag_conflict(db, perceptual_text, existing["root"], 0, flowerbed)
+        db.commit()   # keeps an alias _tags_agree may have recorded
         root_raw = decode_bytes(existing["root"], ROOT_BYTES)
         return {"status": "existing", "perceptual": perceptual_text, "root": existing["root"],
                 "signature": encode_signature(fp, root_raw), "distance": 0, "algorithm": existing["algorithm"]}
@@ -65,6 +117,8 @@ def resolve(db: sqlite3.Connection, perceptual_text: str, duration=None, rms=Non
             return {"status": "ambiguous", "perceptual": perceptual_text, "algorithm": ALGORITHM_VERSION,
                     "candidates": [{"root": r, "distance": d, "matched_perceptual": p}
                                    for d, r, p in ranked[:5] if d <= MAX_MATCH_DISTANCE]}
+        if not _tags_agree(db, best_root, flowerbed):
+            return _tag_conflict(db, perceptual_text, best_root, best_dist, flowerbed)
         db.execute("INSERT INTO fingerprints(perceptual,root,algorithm,created_at,duration,rms,source) VALUES(?,?,?,?,?,?,?)",
                    (perceptual_text, best_root, ALGORITHM_VERSION, time.time(), duration, rms, source))
         db.commit()
@@ -73,13 +127,21 @@ def resolve(db: sqlite3.Connection, perceptual_text: str, duration=None, rms=Non
                 "signature": encode_signature(fp, root_raw), "distance": best_dist,
                 "matched_perceptual": matched_fp, "algorithm": ALGORITHM_VERSION}
 
-    _, root_text = new_root()
-    db.execute("INSERT INTO roots(root,created_at) VALUES(?,?)", (root_text, time.time()))
+    # No audio match. Flowerbed tags already known: same artist/title/month is the same song, so join it.
+    status, root_text = "created", flowerbed and canonical_root(db, flowerbed)
+    if root_text:
+        status = "rooted"
+    elif flowerbed:
+        root_text = flowerbed
+        db.execute("INSERT INTO roots(root,created_at,scheme) VALUES(?,?,?)", (root_text, time.time(), flowerbed_mod.SCHEME))
+    else:
+        _, root_text = new_root()
+        db.execute("INSERT INTO roots(root,created_at,scheme) VALUES(?,?,?)", (root_text, time.time(), flowerbed_mod.RANDOM))
     db.execute("INSERT INTO fingerprints(perceptual,root,algorithm,created_at,duration,rms,source) VALUES(?,?,?,?,?,?,?)",
                (perceptual_text, root_text, ALGORITHM_VERSION, time.time(), duration, rms, source))
     db.commit()
     root_raw = decode_bytes(root_text, ROOT_BYTES)
-    return {"status": "created", "perceptual": perceptual_text, "root": root_text,
+    return {"status": status, "perceptual": perceptual_text, "root": root_text,
             "signature": encode_signature(fp, root_raw), "algorithm": ALGORITHM_VERSION}
 
 
@@ -125,7 +187,8 @@ class Handler(BaseHTTPRequestHandler):
                 if path == ["", "fingerprints", "resolve"]:
                     if payload.get("algorithm", ALGORITHM_VERSION) != ALGORITHM_VERSION:
                         return self._json(409, {"error":"unsupported algorithm version"})
-                    result = resolve(db, payload["perceptual"], payload.get("duration"), payload.get("rms"), payload.get("source", ""))
+                    result = resolve(db, payload["perceptual"], payload.get("duration"), payload.get("rms"),
+                                     payload.get("source", ""), payload.get("flowerbed"))
                     return self._json(200, result)
                 if path == ["", "fingerprints", "aliases"]:
                     fp_text, root_text = payload["perceptual"], payload["root"]

@@ -18,7 +18,8 @@ A file-by-file index of the public methods, important internals, configuration, 
 | Settings | `envfile.py` | Dependency-free `.env` loader (`FAFO_DIR`, Spotify credentials, MusicBrainz contact) |
 | MusicBrainz | `musicbrainz.py` | Cached, throttled client: artist aliases, reference releases for album checks |
 | Artist matching | `artists.py` | Whole-word artist matching with an optional alias source |
-| FAFO cache | `library_index.py` | SQLite cache of library fingerprints and `--resume` results (`FAFO_DIR`) |
+| FAFO cache | `library_index.py` | SQLite cache of library fingerprints, xv3 spectra and `--resume` results (`FAFO_DIR`); per-album chunks |
+| Flowerbed roots | `flowerbed.py` | Tag-derived registry roots: normalized `ARTIST/TITLE/YYYY.MM` hashed with SHA-1 |
 | Tests | `tests/` | `test_audio_sig.py`, `test_compare.py`, `test_apple.py`, `test_library_index.py` |
 
 ## 1. `audio_sig.py` — DSP and identifiers
@@ -96,9 +97,10 @@ python scan_folder.py "D:\\Music" --token "$AUDIO_SIG_API_TOKEN"
 
 ### Functions and class methods
 
-- **`connect(db_path)`** — open SQLite, enable WAL and foreign keys, and create tables/indexes if absent.
-- **`new_root()`** — generate a random 20-byte canonical root and its base-49 text. Roots are registry-issued IDs, not audio-derived hashes.
-- **`resolve(db, perceptual_text, duration=None, rms=None, source="")`** — main match-and-register operation. Exact existing fingerprint → `existing`; confident nearby fingerprint → `matched`; unclear candidate set → `ambiguous`; no eligible candidate → `created`.
+- **`connect(db_path)`** — open SQLite, enable WAL and foreign keys, and create tables/indexes if absent. Adds `roots.scheme` (default `random`) to older databases.
+- **`new_root()`** — generate a random 20-byte canonical root and its base-49 text.
+- **`resolve(db, perceptual_text, duration=None, rms=None, source="", flowerbed=None)`** — main match-and-register operation. Exact existing fingerprint → `existing`; confident nearby fingerprint → `matched`; unclear candidate set → `ambiguous`; no eligible candidate → `created` (random root, or the `flowerbed` root when given). With `flowerbed` (29-char root text): no audio match but the tag root is known → `rooted`; audio matches a random root and the tag root is new → alias recorded; audio and tags point to different identities → `ambiguous` with `reason: "tags"` and nothing written. Any path that does not commit is rolled back.
+- **`canonical_root(db, root_text)`** — the root itself, the root an alias points to, or `None`.
 - **`Handler._headers(status)` / `_json(status, obj)`** — shared HTTP response formatting and JSON serialization.
 - **`Handler._authorized()`** — validates bearer token when `AUDIO_SIG_API_TOKEN` is configured.
 - **`Handler.do_GET()`** — retrieve one fingerprint by perceptual ID.
@@ -129,7 +131,8 @@ Possible statuses: `created`, `matched`, `existing`, `ambiguous`. Review ambiguo
 
 ### Database tables
 
-- **`roots`** — one row per canonical identity (`root`, creation time, optional note).
+- **`roots`** — one row per canonical identity (`root`, creation time, optional note, `scheme`: `random` or `flowerbed-v1`).
+- **`root_aliases`** — `alias` (PK, a flowerbed root) → `root` it resolves to, with `scheme` and creation time. Written only when audio matched a random root.
 - **`fingerprints`** — one row per unique perceptual ID, linked to a root and algorithm version; stores timestamp and optional duration/RMS/source metadata.
 
 `BEGIN IMMEDIATE` serializes resolution transactions so simultaneous registrations do not race through the match-and-create path. SQLite uniqueness constraints remain a final guard against duplicate keys.
@@ -158,9 +161,9 @@ The `headers` option supports an app-managed auth flow; `fetchImpl` can be repla
 ## 5. `fafo.py` — service command line
 
 - **`SERVICES`** — `("fingerprint", "compare", "stats", "xv3")`; `main(argv)` dispatches on the first argument (exit `2` for an unknown or missing service).
-- **`fingerprint_record(path, index, accel, with_subfps) -> dict`** — `{file, status: indexed|cached|computed, duration, asfp-v1, frames[, asfp-v2]}`.
-- **`fingerprint_main(argv, prog)`** / **`stats_main(argv, prog)`** — the `fingerprint` and `stats` services; `compare` is `compare.main(argv, prog="fafo.py compare")`.
-- **`xv3_record(path, accel, with_bands) -> (dict, Spectrum)`** / **`xv3_main(argv, prog)`** — the experimental `xv3` service: `{file, duration, xv3, segments[, bands]}` per file, or one `--pair` record `{a, b, plot_db, missing, extra, match}`.
+- **`fingerprint_record(path, index, accel, with_subfps, with_flowerbed=False) -> dict`** — `{file, status: indexed|cached|computed, duration, asfp-v1, frames[, asfp-v2][, flowerbed, root, signature]}`. `index` may be a `LibraryIndex` or `ChunkedIndex`.
+- **`fingerprint_main(argv, prog)`** / **`stats_main(argv, prog)`** — the `fingerprint` and `stats` services (both take `--folder-chunk`); `compare` is `compare.main(argv, prog="fafo.py compare")`.
+- **`xv3_record(path, accel, with_bands, index=None, plot_signed=False) -> (dict, Spectrum)`** / **`xv3_main(argv, prog)`** — the experimental `xv3` service: `{file, status, duration, xv3, segments, trimmed[, flowerbed, root, plot_signed][, bands]}` per file, or one `--pair` record `{a, b, plot_db, missing, extra, match}`. Spectra come from the index unless `--no-index`.
 
 Options and output formats are in `README.md` ("Command line: `fafo.py`").
 
@@ -181,7 +184,7 @@ CLI options, output records, mismatch codes and exit codes are documented in `RE
 
 ### Types
 
-- **`LibraryTrack`** — `path, title, artist, album_artist, album, track, disc, duration, isrc, explicit` (frozen dataclass).
+- **`LibraryTrack`** — `path, title, artist, album_artist, album, track, disc, duration, isrc, explicit, …, flowerbed` (frozen dataclass). `flowerbed` is the tag-only key from `flowerbed.key_from_tags`, or `None`.
 - **`ServiceTrack`** — `service, id, url, title, artists, album, duration, isrc, explicit, preview_url, track, disc, album_match`. `album_match=True` means it was found inside an edition of the library track's album.
 - **`Adapter`** (Protocol) — `name: str`, `find(track) -> list[ServiceTrack]` (best first).
 
@@ -192,7 +195,8 @@ CLI options, output records, mismatch codes and exit codes are documented in `RE
 - **`normalize_title(title) -> (base, frozenset qualifiers)`** — drops feat./with credits, collects version words from brackets and ` - ` suffixes; symbol-only titles keep their raw casefold.
 - **`is_confident(track, candidate)`** / **`pick_reference(track, adapters)`** — confidence rule and first-confident-service precedence.
 - **`check_track(track, ref, duration_tolerance)`** — metadata mismatches (`DURATION`, `ISRC`, `EXPLICIT`, `TITLE_VERSION`); unknown values never count.
-- **`decode_url(url, seconds=PREVIEW_SECONDS)`** — host-checked, protocol-whitelisted FFmpeg stream into memory.
+- **`decode_url(url, seconds=PREVIEW_SECONDS, rate=TARGET_RATE)`** — host-checked, protocol-whitelisted FFmpeg stream into memory (`rate=spectrum_sig.RATE` for xv3).
+- **`open_index(path, accel, folder_chunk)`** — `LibraryIndex(path)`, or `ChunkedIndex(path.parent, source=path)` with `--folder-chunk`.
 - **`library_subfingerprints(path, index=None, accel=True)`** — v2 sequence of a library file, from the FAFO index when given.
 - **`audio_check(track, ref, index=None, accel=True) -> (info, mismatch|None)`** — preview vs library alignment.
 - **`compare(track, adapters, audio=True, index=None, accel=True) -> dict`** — full record for one track. Audio failures go to `record["audio"]["error"]` and never hide metadata mismatches.
@@ -234,8 +238,11 @@ CLI options, output records, mismatch codes and exit codes are documented in `RE
   - **`entry(path) -> ({duration, v1, subfps}, was_cached)`** — cached entry, or decode + `analyze` + store (one transaction per file).
   - **`subfingerprints(path)`** — `entry(path)[0]["subfps"]`.
   - **`cached(path)`** — whether an up-to-date entry exists.
-  - **`stats()`** — `{index, fingerprints, frames, last_indexed, results: {status: count}, bytes}`.
+  - **`stats()`** — `{index, fingerprints, frames, spectra, last_indexed, results: {status: count}, bytes}`.
   - **`result(path, options)`** / **`save_result(path, options, record)`** — `--resume` records keyed by file state and `options` (JSON, sorted keys).
+  - **`spectrum(path) -> (Spectrum, was_cached)`** — xv3 spectrum, cached per file state and `spectrum_sig.RECIPE`. A fresh result is returned as it will read back (windows rounded to 0.01 dB).
+- **`chunk_name(folder) -> str`** — `--folder-chunk` database name: NFC, then JavaScript `escape()` over UTF-16 code units with `;` for `%` (`;XX` / `;uXXXX`), trailing `.` → `;2E`.
+- **`ChunkedIndex(folder, accel=True, source=INDEX_PATH)`** — same methods as `LibraryIndex` (plus `chunk(path)`), routed to `<folder>/<chunk_name(parent folder name)>.sqlite3`. A chunk created for the first time copies its folder's rows (all three tables) from `source`, opened read-only. `stats()` totals every chunk database in `folder` (adds `chunks`; skips `source` and databases without a `fingerprints` table).
 
 Tables:
 
@@ -243,24 +250,37 @@ Tables:
 |---|---|
 | `fingerprints` | `path` (PK), `size`, `mtime_ns`, `algorithm`, `duration`, `v1` (21-byte BLOB), `subfps` (uint32 little-endian array BLOB), `indexed_at` (ISO-8601 UTC) |
 | `results` | `path` (PK), `size`, `mtime_ns`, `options` (JSON), `record` (JSON), `checked_at` (ISO-8601 UTC) |
+| `spectra` | `path` (PK), `size`, `mtime_ns`, `recipe`, `duration`, `plot` (float64 LE BLOB, 52 values), `windows` (int16 LE centi-dB, 52 per window, `-32768` row = silent), `grid` (uint16 LE window indices of the segments), `trim_lead`, `trim_tail` (seconds), `indexed_at` |
+
+## 8b. `flowerbed.py` — tag-derived roots
+
+- **`SCHEME = "flowerbed-v1"`**, **`RANDOM = "random"`** — root schemes stored in the registry.
+- **`normalize(text)`** — NFC, UPPERCASE, whitespace runs to one space, no spaces touching Unicode `P*` punctuation (`$` and other symbols keep theirs).
+- **`artists(text)`** — split on `;` (and NUL), trim, normalize, re-join with `;`.
+- **`month(date) -> "YYYY.MM" | None`** — accepts `YYYY`, `YYYY-MM[-DD]`, `YYYY.MM`, `YYYY/MM`; a year alone is January; an invalid month is `None`.
+- **`key(artist, title, date)`** — `ARTIST/TITLE/YYYY.MM`; `ValueError` if any part is empty. **`key_from_tags(tags)`** reads case-folded ffprobe tags (`artist`, `title`, `date` → `year` → `original date`) and returns `None` instead of raising.
+- **`root(key) -> bytes`** — `SHA-1("flowerbed-v1\n" + key)`, 20 bytes. **`root_text(key)`** — base-49, 29 characters.
 
 ## 8a. `spectrum_sig.py` — xv3 spectrum plots (experimental)
 
 Not used by `compare`; see `PLAN.md` §9.3 for status and calibration.
 
-- **Constants** — `RATE = 32000`, `FFT_SIZE = 8192` (Hann window, hop 4096), `LOW_HZ = 40`, `HIGH_HZ = 15000`, `BANDS_PER_OCTAVE = 6` (so `BANDS = 52`), `SEGMENT_SECONDS = 10` with match windows every `STEP_SECONDS = 1.25`, `SILENT_DBFS = -60`, `TILT_DB_PER_OCTAVE = -5` (mean-centred as `TILT`), `STEP_DB = 1` with `LEVEL_BITS = 5` (`LEVELS = 32`, `PLOT_BYTES = 33`), `PLOT_JOIN = "$"` (reserved for `--plot-signed`), and provisional `PLOT_MAX_DB` / `SECTION_MAX_DB`.
+- **Constants** — `RATE = 32000`, `FFT_SIZE = 8192` (Hann window, hop 4096), `LOW_HZ = 40`, `HIGH_HZ = 15000`, `BANDS_PER_OCTAVE = 6` (so `BANDS = 52`), `SEGMENT_SECONDS = 10` with match windows every `STEP_SECONDS = 1.25`, `SILENT_DBFS = -60`, `TILT_DB_PER_OCTAVE = -5` (mean-centred as `TILT`), `STEP_DB = 1` with `LEVEL_BITS = 5` (`LEVELS = 32`, `PLOT_BYTES = 33`), `PLOT_JOIN = "-"` (for `--plot-signed`), edge trim `TRIM_DB = 20` / `TRIM_MAX_SECONDS = 10` / `TRIM_LOUD_PERCENTILE = 0.9`, provisional `PLOT_MAX_DB` / `SECTION_MAX_DB`, and `RECIPE` (the cache key built from all of these).
 - **`decode(path, seconds=None) -> array('f')`** — FFmpeg decode to mono float32 at `RATE`.
-- **`analyze(samples, accel=True) -> Spectrum`** — returns `Spectrum(duration, plot, segments, windows)`.
+- **`analyze(samples, accel=True, trim_db=TRIM_DB) -> Spectrum`** — returns `Spectrum(duration, plot, segments, windows, starts, trimmed)`.
+  - Quiet edges: 1.25-second blocks at the start and end more than `trim_db` under the file's loud level (90th percentile block level) are left out of the grid, at most `TRIM_MAX_SECONDS` per end. `trimmed` = (intro, outro) seconds; `starts` = each segment's start in seconds. `trim_db=None` turns trimming off. Windows are never trimmed, so trimmed audio can still be matched by the other file.
   - `plot` is the whole file's mean power per band in dB, minus its mean; silent blocks are left out.
   - `windows` are 10-second spans that start every `STEP_SECONDS`; `None` marks a silent one. A tail window shorter than half a segment is dropped unless it is the only one.
   - Each window sums only the frames lying wholly inside it; prefix sums keep that cheap.
   - Window bands more than `FLOOR_DB = 40` below the window's loudest band are raised to that floor: encoders fill near-empty bands with noise, which otherwise flagged quiet intros. The whole-file `plot` is not floored.
-  - `segments` are every eighth window: the fixed 10-second grid.
+  - `segments` are every eighth window from the end of the quiet intro: a 10-second grid. Segments reaching into a trimmed outro are dropped.
   - NumPy and pure Python agree to about 1e-13 dB.
 - **`encode_plot(plot) -> str`** / **`decode_plot(text) -> list[float]`** — 5 bits per band, in `STEP_DB` steps around `TILT`, clamped to ±16 dB, bit-packed big-endian into `PLOT_BYTES`, then base-49 (48 characters).
 - **`band_weights(vocal_weight=1.0, low_hz=60, high_hz=1050)`** — per-band weights for `distance`.
 - **`distance(a, b, weights=None) -> float`** — weighted RMS dB difference, each plot re-centred on its weighted mean.
-- **`unmatched(a, b, max_db, weights)`** / **`section_diff(a, b, max_db, weights) -> {missing, extra}`** — each loud grid segment of one file is matched against every loud sliding window of the other, in any order; spans are in seconds.
+- **`unmatched(a, b, max_db, weights)`** / **`section_diff(a, b, max_db, weights) -> {missing, extra}`** — each loud grid segment of one file is matched against every loud sliding window of the other, in any order; spans are `[start, end]` seconds from `starts`.
+- **`plot_signature(plot, root) -> str`** — `--plot-signed`: plot code + `PLOT_JOIN` + base-49 root (78 characters).
+- **`to_blobs(spectrum)`** / **`from_blobs(duration, plot, windows, grid, trimmed)`** — the `spectra` table encoding.
 
 ## 9. `tests/` — coverage
 
@@ -273,9 +293,10 @@ python -m unittest discover -s tests -v
 - `test_audio_sig.py` — encoding round trips, v1 regression pin, v2 shape/alignment/half-hop recovery, NumPy parity (skipped without NumPy).
 - `test_compare.py` — ffprobe parsing, title normalization, mismatch rules, precedence, audio check (mocked), preview URL guard, CLI (temp library left untouched, `--report`/`--index` refused inside the folder, `--resume`, `--index-only`).
 - `test_apple.py` — adapter against recorded-style fake API responses (editions, artist filter, throttling).
-- `test_library_index.py` — cache hits, invalidation on change, results keyed by options, lazy creation.
-- `test_fafo.py` — `fingerprint` (indexed then cached, single file, `--subfingerprints`, `--quiet`, `--no-index`, errors, refusals), `compare` delegation, `stats`, `xv3` (listing writes nothing, `--pair` match and added section), help and unknown services.
-- `test_spectrum_sig.py` — xv3 band layout and tilt, loudness independence, plot-code round trip and clamping, NumPy parity, added/missing sections, offset excerpts, window floor, silent segments, rejections, vocal weights.
+- `test_library_index.py` — cache hits, invalidation on change, results keyed by options, lazy creation; `--folder-chunk` names (escape() examples, surrogates, NFC, trailing dot), shared databases, first-use copy without decoding, chunk stats.
+- `test_fafo.py` — `fingerprint` (indexed then cached, single file, `--subfingerprints`, `--quiet`, `--no-index`, errors, refusals), `compare` delegation, `stats`, `xv3` (listing writes nothing with `--no-index`, spectra cached, `--plot-signed`, `--pair` match and added section), help and unknown services.
+- `test_spectrum_sig.py` — xv3 band layout and tilt, loudness independence, plot-code round trip and clamping, NumPy parity, added/missing sections, offset excerpts, window floor, silent segments, quiet-edge trim (capped at 10 s), cache blobs, plot signature, rejections, vocal weights.
+- `test_flowerbed.py` — normalization examples, artists, dates, key/root, tag-only probe; registry: flowerbed `created`/`rooted`, alias on a random root, tag conflict `ambiguous` with nothing written, unchanged behaviour without flowerbed, `scheme` migration.
 
 No test uses the network or the real library. These are unit tests, **not** proof of perceptual matching quality or full Python/JavaScript equivalence; calibration data is in `PLAN.md` §2.2.
 
@@ -288,7 +309,7 @@ The raw binary layout is 21 perceptual bytes + one ASCII `_` separator byte + 20
 1. **Keep the DSP mirrored.** Any change to FFT, resampling, band edges, region boundaries, bit order, or quantization may require a new `ALGORITHM_VERSION` and new test fixtures.
 2. **Resampling differs by platform.** Native FFmpeg and browser Web Audio/linear resampling may yield different samples. Test actual cross-encoded fixtures before raising automatic merge confidence.
 3. **Thresholds are heuristics.** The default distance and ambiguity margin are starting values, not measured guarantees. Tune against labeled same-recording and different-recording pairs.
-4. **Roots require the shared registry.** They are random registry-assigned identifiers. A client cannot independently recreate a root from audio alone.
+4. **Random roots require the shared registry.** A client cannot recreate a random root from audio alone. Flowerbed roots can be recreated from tags anywhere, so **never change `flowerbed.py`'s recipe without a new `SCHEME`**.
 5. **Deployment hardening is required for shared use.** Put the service behind TLS and an authenticated proxy, set a strict CORS origin, restrict network access, back up the database, and add request/rate limits before public deployment.
 6. **Fingerprint v1 is sensitive to edits.** Long silence padding, excerpts, or edits can change the fingerprint substantially because it divides the entire file into six equal-duration regions. Use v2 (`align_excerpt`) for excerpts.
 7. **The output contract is an API.** Other programs (a PyLy controller) parse `compare.py`'s JSONL records, mismatch codes, summary line and exit codes. Change them only additively, and update `README.md` when you do.

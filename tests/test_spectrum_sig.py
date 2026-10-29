@@ -86,6 +86,32 @@ class Xv3Tests(unittest.TestCase):
         with self.assertRaises(ValueError):
             s.analyze([0.1] * (s.FFT_SIZE - 1))
 
+    def test_quiet_edges_are_trimmed_at_most_ten_seconds(self):
+        quiet = lambda secs: [x * 0.03 for x in tones(secs, LOW)]   # about 30 dB under the loud part
+        pcm = quiet(5) + tones(30, LOW) + quiet(15)
+        trimmed = s.analyze(pcm)
+        self.assertEqual(trimmed.trimmed, (5.0, float(s.TRIM_MAX_SECONDS)))
+        self.assertEqual(trimmed.starts, [5.0, 15.0, 25.0])
+        self.assertEqual(s.unmatched(trimmed, s.analyze(tones(30, LOW)), s.SECTION_MAX_DB), [])
+        whole = s.analyze(pcm, trim_db=None)
+        self.assertEqual((whole.trimmed, whole.starts[0], len(whole.windows)), ((0.0, 0.0), 0.0, len(trimmed.windows)))
+        self.assertEqual(s.analyze(tones(12, LOW)).trimmed, (0.0, 0.0))   # steady audio keeps everything
+
+    def test_cache_blobs_round_trip(self):
+        spectrum = s.analyze(tones(10, LOW) + [0.0] * (10 * s.RATE) + tones(10, HIGH))
+        back = s.from_blobs(spectrum.duration, *s.to_blobs(spectrum), spectrum.trimmed)
+        self.assertEqual((back.plot, back.starts, back.trimmed), (spectrum.plot, spectrum.starts, spectrum.trimmed))
+        self.assertEqual([w is None for w in back.windows], [w is None for w in spectrum.windows])
+        self.assertEqual([w is None for w in back.segments], [False, True, False])
+        for x, y in zip(back.windows, spectrum.windows):
+            if x is not None:
+                self.assertLessEqual(max(abs(p - q) for p, q in zip(x, y)), 0.005 + 1e-9)
+
+    def test_plot_signature(self):
+        sig = s.plot_signature(s.TILT, bytes(range(20)))
+        plot, root = sig.split(s.PLOT_JOIN)
+        self.assertEqual((len(plot), len(root), s.PLOT_JOIN), (48, 29, "-"))
+
     def test_vocal_weights(self):
         weights = s.band_weights(0.0)
         self.assertEqual(len(weights), s.BANDS)

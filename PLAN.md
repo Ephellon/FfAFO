@@ -191,6 +191,7 @@ Clean and explicit versions differ only in muted words, so the BER difference wi
     - Examples: `Post Malone` → `Post;20Malone`, `¥$` → `;A5;24`, `カニエ` → `;u30AB;u30CB;u30A8`, `a;b` → `a;3Bb`.
     - A trailing `.` becomes `;2E`, because Windows can't create file names ending in a dot.
   - **Migration:** the first `--folder-chunk` run copies existing entries from `library-index.sqlite3` into the chunk databases (no re-fingerprinting) and leaves the original in place.
+- **Built (2026-10-28):** `library_index.chunk_name` + `ChunkedIndex`; `--folder-chunk` on `fingerprint`, `compare`, `xv3` and `stats` (totals over chunks). Names are NFC first. A chunk copies its folder's rows (fingerprints, results, spectra) the first time its file is created; the single index is opened read-only (`mode=ro`). Measured: VULTURES 2 + Encore seeded from the real index in 1.9 s with no decoding (`VULTURES;202.sqlite3`, `Encore.sqlite3`). An album folder named exactly `library-index` or `musicbrainz-cache` would share that file; not guarded.
 
 ### 9.2 `--flowerbed` (rooted): roots derived from tags
 - Today the registry's 20-byte root is random (README "Known limits"). With flowerbed, the root comes from tags instead: `<artist>/<track>/<year.month>`. The album is ignored on purpose, because an artist rarely releases two songs with the same name in the same month.
@@ -209,6 +210,10 @@ Clean and explicit versions differ only in muted words, so the BER difference wi
   - Store the root's scheme (`random` or `flowerbed-v1`) on each `roots` row.
   - When a fingerprint matches an existing random-root identity, keep the existing root and record the flowerbed root as an alias, rather than replacing it.
   - Use `ambiguous` when the audio matches one root but the tags point to another (same recording, different tags, or a tag typo). Never merge automatically.
+- **Built (2026-10-28):** `flowerbed.py` (key, normalization, root); `LibraryTrack.flowerbed` from tags only (the title's file-name fallback is not used); `fafo.py fingerprint --flowerbed` (key, root, full signature, offline); registry `roots.scheme`, `root_aliases`, `resolve(..., flowerbed=)`; `scan_folder.py --flowerbed`.
+  - **Implementation choices:** punctuation = Unicode `P*` only (keeps `$` spaced, per the `TY DOLLA $IGN` example); NFC before uppercasing; date from `date`, then `year`, then `original date`; a tag root with no audio match joins an existing identity (`rooted`), since the same tags are the same song by definition.
+  - **Known effect (PyLy Controller, 2026-10-28):** PyLy `--fix-tags` can change artist/title tags, which gives the same file a new root. The registry then reports `ambiguous` (`reason: "tags"`) rather than moving the file. PyLy keys on paths and does not need roots.
+  - Not done: the browser module does not compute flowerbed roots.
 
 ### 9.3 `xv3` (experimental): spectrum-plot signatures
 - **Goal:** near-instant whole-file signatures, like the averaged power spectrum (PSD, dB A) in checkhearing.org's Audio Plot Spectrum. That tool averages the first minute in 8,192-sample FFT frames; `xv3` averages the whole file. Reference plot: SLIDE.
@@ -261,3 +266,17 @@ Clean and explicit versions differ only in muted words, so the BER difference wi
   - Test against real streaming previews (network); so far excerpts are cut locally.
   - Store xv3 in the FAFO index so repeat lookups really are instant.
   - `--plot-signed` needs `--flowerbed` (§9.2) for its root.
+
+---
+
+## 10. PyLy integration (2026-10-28)
+
+The PyLy controller uses FAFO output to flag incorrect songs. Planning runs on the Offser shares board: FAFO posts as `ffafo-controller` (MANAGER for this project, per the operator); job `fafo-pyly-flagging` is reserved for `pyly-controller`. PyLy Controller's rulings on PyLy itself stand.
+
+**Rulings received (PyLy Controller, first pass):**
+1. **Codes:** log-only for now, all codes. Planned later: `TRACKLIST` and `RELEASE_WITHDRAWN` mark the album for a PyLy `--get-info --replace` rerun; `AUDIO` marks the album's lyrics suspect (a synced `.lrc` may fit a different recording). `DURATION`, `ISRC` and `EXPLICIT` stay log-only; PyLy writes no ISRC or explicit tags.
+2. **Input:** PyLy reads `R:\FAFO\mismatches.jsonl`; no subprocess per file. `file`/`folder` stay absolute Windows paths spelled as on disk. **Done:** every record now has `checked` (ISO 8601 UTC; reused `--resume` records keep their original time).
+3. **Rechecks:** PyLy `--fix-tags` changes tags only, never audio; a recheck after a tag write is fine. Suggested: key the recheck on an audio-stream hash rather than the file's mtime. **Open:** that needs a hash of the audio payload only, which still reads the whole file; worth measuring against the 1–2 s decode it would save.
+4. **Flowerbed roots:** not needed by PyLy (it keys on paths). Tag fixes change a file's root (§9.2).
+
+**Run order:** FAFO nightly compare at 23:00 must finish before PyLy's nightly (`R:\.etc\fetch-lyrics.ps1`, owned by Task Master) at 05:00.

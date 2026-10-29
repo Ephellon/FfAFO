@@ -267,6 +267,7 @@ class MainTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual([(Path(r["file"]).name, r["status"]) for r in records], [("02 Long.flac", "mismatch")])
         self.assertEqual(records[0]["mismatches"][0]["code"], "DURATION")
+        self.assertRegex(records[0]["checked"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\+00:00$")
         self.assertIn('"unresolved": 1', err)
 
     def test_clean_run_exit_zero_and_flags(self):

@@ -105,25 +105,46 @@ class FafoCliTests(unittest.TestCase):
         song = tones(12, (110, 220, 330))
         self.xv3_audio({"01 One.mp3": song, "02 Two.flac": song})
         before = self.snapshot()
-        code, records, _ = self.run_cli("xv3", str(self.library), "--bands")
+        code, records, _ = self.run_cli("xv3", str(self.library), "--bands", "--no-index")
         self.assertEqual(code, 0)
         self.assertEqual([Path(r["file"]).name for r in records], ["01 One.mp3", "02 Two.flac"])
         self.assertEqual(records[0]["xv3"], records[1]["xv3"])
-        self.assertEqual((records[0]["segments"], len(records[0]["bands"])), (1, 52))
+        self.assertEqual((records[0]["segments"], len(records[0]["bands"]), records[0]["status"]), (1, 52, "computed"))
         self.assertEqual(self.snapshot(), before)
         self.assertFalse((self.root / "FAFO").exists())
+
+    def test_xv3_spectra_are_cached_in_the_index(self):
+        song = tones(12, (110, 220, 330))
+        self.xv3_audio({"01 One.mp3": song, "02 Two.flac": song})
+        before = self.snapshot()
+        _, first, _ = self.run_cli("xv3", str(self.library), "--index", str(self.index))
+        _, again, _ = self.run_cli("xv3", str(self.library), "--index", str(self.index))
+        self.assertEqual([r["status"] for r in first + again], ["indexed", "indexed", "cached", "cached"])
+        self.assertEqual([r["xv3"] for r in first], [r["xv3"] for r in again])
+        self.assertEqual(self.snapshot(), before)
+
+    def test_xv3_plot_signed_joins_the_flowerbed_root(self):
+        song = tones(12, (110, 220, 330))
+        a = self.library / "01 One.mp3"
+        self.xv3_audio({a.name: song})
+        track = mock.Mock(flowerbed="A/ONE/2024.01")
+        with mock.patch.object(fafo.compare, "probe", return_value=track):
+            _, [record], _ = self.run_cli("xv3", str(a), "--no-index", "--plot-signed")
+        plot, root = record["plot_signed"].split("-")
+        self.assertEqual((plot, root, record["flowerbed"]), (record["xv3"], record["root"], "A/ONE/2024.01"))
+        self.assertEqual(root, fafo.flowerbed.root_text("A/ONE/2024.01"))
 
     def test_xv3_pair_reports_added_sections(self):
         song = tones(20, (110, 220, 330))
         a, b = self.library / "01 One.mp3", self.library / "02 Two.flac"
         self.xv3_audio({a.name: song, b.name: song})
-        code, [record], _ = self.run_cli("xv3", "--pair", str(a), str(b))
+        code, [record], _ = self.run_cli("xv3", "--pair", str(a), str(b), "--no-index")
         self.assertEqual((code, record["match"], record["plot_db"]), (0, True, 0.0))
         self.xv3_audio({a.name: song, b.name: song + tones(10, (2500, 5000, 9000))})
-        code, [record], _ = self.run_cli("xv3", "--pair", str(a), str(b))
+        code, [record], _ = self.run_cli("xv3", "--pair", str(a), str(b), "--no-index")
         self.assertEqual((code, record["match"], record["missing"], record["extra"]), (1, False, [], [[20, 30.0]]))
         with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
-            self.run_cli("xv3", "--pair", str(a))
+            self.run_cli("xv3", "--pair", str(a), "--no-index")
 
 
 if __name__ == "__main__": unittest.main()

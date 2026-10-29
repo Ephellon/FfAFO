@@ -64,9 +64,12 @@ class LibraryIndexTests(unittest.TestCase):
             self.assertFalse(index.cached(str(self.track)))
 
     def test_results_keyed_by_file_state_and_options(self):
-        opts, record = {"audio": True, "country": "US"}, {"file": str(self.track), "status": "ok", "mismatches": []}
+        opts = {"audio": True, "country": "US"}
+        record = {"file": str(self.track), "status": "ok", "mismatches": [], "checked": "2026-01-01T00:00:00+00:00"}
         with LibraryIndex(self.db) as index:
             self.assertIsNone(index.result(str(self.track), opts))
+            index.save_result(str(self.track), opts, {k: v for k, v in record.items() if k != "checked"})
+            self.assertRegex(index.result(str(self.track), opts)["checked"], r"^\d{4}-\d\d-\d\dT")   # older rows: checked_at
             index.save_result(str(self.track), opts, record)
             self.assertEqual(index.result(str(self.track), {"country": "US", "audio": True}), record)   # key order irrelevant
             self.assertIsNone(index.result(str(self.track), {**opts, "audio": False}))
@@ -78,6 +81,56 @@ class LibraryIndexTests(unittest.TestCase):
         with LibraryIndex(self.db) as index:
             index.subfingerprints(str(self.track))
         self.assertEqual((self.track.read_bytes(), self.track.stat().st_mtime_ns), before)
+
+
+class FolderChunkTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = Path(self.tmp.name)
+        self.cache = root / "FAFO"
+        self.single = self.cache / "library-index.sqlite3"
+        self.tracks = []
+        for folder in ("Artist A/Post Malone", "Artist B/Post Malone", "Artist A/¥$"):
+            (root / folder).mkdir(parents=True)
+            track = root / folder / "01 song.mp3"
+            track.write_bytes(folder.encode())
+            self.tracks.append(str(track))
+        patch = mock.patch.object(library_index, "decode_audio", return_value=(synth(11025 * 3), 3.0, 0.2))
+        self.decode = patch.start()
+        self.addCleanup(patch.stop)
+
+    def test_chunk_names_follow_javascript_escape(self):
+        self.assertEqual(library_index.chunk_name("Post Malone"), "Post;20Malone")
+        self.assertEqual(library_index.chunk_name("¥$"), ";A5;24")
+        self.assertEqual(library_index.chunk_name("カニエ"), ";u30AB;u30CB;u30A8")
+        self.assertEqual(library_index.chunk_name("a;b"), "a;3Bb")
+        self.assertEqual(library_index.chunk_name("Vol. 1."), "Vol.;201;2E")
+        self.assertEqual(library_index.chunk_name("A\U0001F600"), "A;uD83D;uDE00")   # UTF-16 code units, like escape()
+        self.assertEqual(library_index.chunk_name("é"), ";E9")                 # NFC first
+
+    def test_same_folder_name_shares_a_database(self):
+        with library_index.ChunkedIndex(self.cache, source=self.single) as index:
+            for t in self.tracks:
+                index.subfingerprints(t)
+        self.assertEqual(sorted(p.name for p in self.cache.glob("*.sqlite3")), [";A5;24.sqlite3", "Post;20Malone.sqlite3"])
+        self.assertFalse(self.single.exists())
+
+    def test_first_use_copies_from_the_single_index_without_decoding(self):
+        opts = {"audio": True}
+        with LibraryIndex(self.single) as single:
+            for t in self.tracks:
+                single.subfingerprints(t)
+                single.save_result(t, opts, {"file": t, "status": "ok"})
+        before = self.single.read_bytes()
+        self.decode.reset_mock()
+        with library_index.ChunkedIndex(self.cache, source=self.single) as index:
+            self.assertTrue(all(index.cached(t) for t in self.tracks))
+            self.assertEqual(index.result(self.tracks[2], opts)["file"], self.tracks[2])
+            stats = index.stats()
+        self.assertEqual(self.decode.call_count, 0)
+        self.assertEqual(self.single.read_bytes(), before)   # left in place, unchanged
+        self.assertEqual((stats["chunks"], stats["fingerprints"], stats["results"]), (2, 3, {"ok": 3}))
 
 
 if __name__ == "__main__": unittest.main()

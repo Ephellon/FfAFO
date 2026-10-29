@@ -49,7 +49,7 @@ Artist names match on whole words ("Ye" does not match inside "Kanye"); when tha
 | `fingerprint PATH...` | Fingerprints audio files/folders into the FAFO index and prints each file's fingerprint | none |
 | `compare PATH...` | Compares files/folders with the streaming services and reports mismatches | Apple Music |
 | `stats` | Prints what the FAFO index holds (counts, size, last indexed, stored results by status) | none |
-| `xv3 PATH...` | **Experimental.** Spectrum-plot signatures; `--pair A B` compares two files (see below) | none |
+| `xv3 PATH...` | **Experimental.** Spectrum-plot signatures, cached in the FAFO index; `--pair A B` compares two files (see below) | none |
 
 `PATH` can be any mix of folders (scanned recursively for `.wav .mp3 .m4a .aac .flac .ogg .opus .wma .aiff .aif .mp4 .webm`) and single audio files. `python fafo.py <service> --help` lists options. `python compare.py ...` is the same as `python fafo.py compare ...`.
 
@@ -68,19 +68,23 @@ Both `fingerprint` and `compare` can be interrupted and re-run: finished files a
 |---|---|
 | `--index PATH` | FAFO index (default `%FAFO_DIR%\library-index.sqlite3`; must be outside the scanned folders) |
 | `--no-index` | Compute only; do not read or write the index |
+| `--folder-chunk` | One index per album folder instead of one file (see [FAFO cache](#fafo-cache-fast-fourier-audio-fingerprinting-offline)) |
+| `--flowerbed` | Add the tag-derived identity: `flowerbed` key, `root` and full `signature` (see [Flowerbed roots](#flowerbed-roots)) |
 | `--no-numpy` | Methodical mode: pure-Python FFT (same output, about 30× slower) |
 | `--subfingerprints` | Include the full `asfp-v2` sequence (list of 28-bit integers) in each record |
 | `--quiet` | No per-file records on stdout; errors and the summary only |
 | `--progress` | Print `[n/total] path` per file to stderr |
 
-One JSON line per file on stdout:
+One JSON line per file on stdout (here with `--flowerbed`):
 
 ```json
 {"file": "R:\\Local\\¥$\\VULTURES 2\\01 SLIDE.mp3", "status": "cached", "duration": 198.06,
- "asfp-v1": "GEwb94yMXKQqkPmAJzxMc6gpXinxcG", "frames": 4260}
+ "asfp-v1": "GEwb94yMXKQqkPmAJzxMc6gpXinxcG", "frames": 4260,
+ "flowerbed": "¥$/SLIDE/2024.08", "root": "6CjQWV6XVnKDjAjk9yMUiipqAemEk",
+ "signature": "GEwb94yMXKQqkPmAJzxMc6gpXinxcG_6CjQWV6XVnKDjAjk9yMUiipqAemEk"}
 ```
 
-`status` is `indexed` (computed and stored now), `cached` (already in the index), or `computed` (with `--no-index`). `asfp-v1` is the 30-character whole-track hash (the same value the registry uses); `frames` is the length of the `asfp-v2` sequence. Failed files go to stderr as `{"file": ..., "status": "error", "error": "message"}`. The stderr summary is `{"summary": {"files": n, "indexed": n, "cached": n, "computed": n, "error": n}}`. Exit code: `0` all files fingerprinted, `1` at least one failed, `2` invalid arguments.
+`status` is `indexed` (computed and stored now), `cached` (already in the index), or `computed` (with `--no-index`). `asfp-v1` is the 30-character whole-track hash (the same value the registry uses); `frames` is the length of the `asfp-v2` sequence. With `--flowerbed`, `flowerbed` is `null` (and `root`/`signature` are left out) when the file lacks an artist, title or dated year tag. Failed files go to stderr as `{"file": ..., "status": "error", "error": "message"}`. The stderr summary is `{"summary": {"files": n, "indexed": n, "cached": n, "computed": n, "error": n}}`. Exit code: `0` all files fingerprinted, `1` at least one failed, `2` invalid arguments.
 
 #### `compare` options
 
@@ -94,6 +98,7 @@ One JSON line per file on stdout:
 | `--no-audio` | Metadata checks only; no preview streaming |
 | `--index PATH` | FAFO fingerprint cache, default `%FAFO_DIR%\library-index.sqlite3` (see below) |
 | `--no-index` | Do not use or create the cache (each run re-fingerprints) |
+| `--folder-chunk` | One cache per album folder beside `--index`; the first use copies entries over from `--index` |
 | `--index-only` | Only fingerprint library files into the cache; no service lookups (older form of `fafo.py fingerprint --quiet`) |
 | `--resume` | Store each file's result in the cache; later `--resume` runs reuse it for unchanged files under the same options, with no network access. Omit it to force a fresh check |
 | `--no-numpy` | "Methodical" mode: pure-Python FFT for new fingerprints (same output, about 30× slower) |
@@ -103,7 +108,11 @@ One JSON line per file on stdout:
 
 #### `xv3` (experimental): spectrum-plot signatures
 
-Not used by `compare`, and its thresholds are provisional until real-world testing is done (`PLAN.md` §9.3). Each file is decoded once, mono at 32 kHz. The whole file is averaged into a power spectrum, like an audio spectrum plot: 52 bands of 1/6 octave from 40 Hz to 15 kHz, in dB relative to the file's own mean, so loudness does not count. A spectrum is also kept for each 10-second segment, so a section added or missing in one file shows up even when the whole-file average barely moves. Segments are compared with 10-second windows of the other file that slide in 1.25-second steps, so a time offset between the two files does not count. Bands more than 40 dB below a segment's loudest band count as empty, so encoder noise in quiet intros does not count either. Nothing is cached or written.
+Not used by `compare`, and its thresholds are provisional until real-world testing is done (`PLAN.md` §9.3). Each file is decoded once, mono at 32 kHz. The whole file is averaged into a power spectrum, like an audio spectrum plot: 52 bands of 1/6 octave from 40 Hz to 15 kHz, in dB relative to the file's own mean, so loudness does not count. A spectrum is also kept for each 10-second segment, so a section added or missing in one file shows up even when the whole-file average barely moves. Segments are compared with 10-second windows of the other file that slide in 1.25-second steps, so a time offset between the two files does not count. Bands more than 40 dB below a segment's loudest band count as empty, so encoder noise in quiet intros does not count either.
+
+**Quiet edges are trimmed.** A quiet intro or outro (count-ins, fades, room noise, or a preview's fade) is left out of the segments when it sits more than 20 dB under the file's loud level (the 90th percentile of its 1.25-second block levels). At most 10 seconds is trimmed from each end. Trimmed audio still counts as something the *other* file can match against. `trimmed` in each record gives the seconds left out at the start and end.
+
+**Cached.** Spectra are stored in the FAFO index (`spectra` table), keyed by path, size, modification time and the full xv3 recipe, so a repeat lookup reads the index instead of decoding. Any change to the recipe recomputes everything.
 
 | Option | Effect |
 |---|---|
@@ -112,17 +121,21 @@ Not used by `compare`, and its thresholds are provisional until real-world testi
 | `--section-db N` | `--pair`: largest segment distance still called the same section |
 | `--vocal-weight W` | Weight of bands centred in 60–1050 Hz (`0` ignores them; default `1`) |
 | `--bands` | Include the unquantized plot (`bands`: 52 dB values) |
+| `--plot-signed` | Add `plot_signed`: the plot code and the [flowerbed root](#flowerbed-roots) joined by `-` (forces flowerbed; also adds `flowerbed` and `root`) |
+| `--index PATH` / `--no-index` / `--folder-chunk` | Same as for `fingerprint` |
 | `--no-numpy` | Methodical mode: pure-Python FFT (same output, much slower) |
 | `--progress` | Print `[n/total] path` per file to stderr |
 
 Without `--pair`, there is one line per file. The `xv3` value is the plot stored as its difference from a typical music slope (−5 dB per octave), in 1 dB steps within ±16 dB. That is 5 bits per band: 33 bytes, or 48 characters in the signature alphabet, with about 0.3 dB of rounding error.
 
 ```json
-{"file": "R:\\Local\\Doechii\\Alligator Bites Never Heal\\16 SLIDE.mp3", "duration": 174.289,
- "xv3": "3ckNaxd47ERAR6LnHfAMEt6mygYEjKke4MaJJC7RppjEn4bi", "segments": 17}
+{"file": "R:\\Local\\Doechii\\Alligator Bites Never Heal\\16 SLIDE.mp3", "status": "cached", "duration": 174.289,
+ "xv3": "3ckNaxd47ERAR6LnHfAMEt6mygYEjKke4MaJJC7RppjEn4bi", "segments": 17, "trimmed": [0.0, 0.0]}
 ```
 
-With `--pair`, one line: `{"a": {...}, "b": {...}, "plot_db": 0.84, "missing": [[start, end], ...], "extra": [[start, end], ...], "match": true}`. `missing` lists sections of `A` (in seconds) heard nowhere in `B`; `extra` lists sections of `B` heard nowhere in `A`. Exit code: `0` match, `1` no match or a failed file, `2` invalid arguments. Segments are matched without regard to order, so padding and edits do not count as differences; silent segments are skipped.
+`status` is `indexed`, `cached` or `computed`, as for `fingerprint`. With `--plot-signed`, `plot_signed` is 78 characters, `<48-char plot>-<29-char root>`; `-` is not in the signature alphabet, so it always splits cleanly and needs no shell quoting.
+
+With `--pair`, one line: `{"a": {...}, "b": {...}, "plot_db": 0.84, "missing": [[start, end], ...], "extra": [[start, end], ...], "match": true}`. `missing` lists sections of `A` (in seconds) heard nowhere in `B`; `extra` lists sections of `B` heard nowhere in `A`. A section starts where its segment does, so after a trimmed intro the spans start at the trim (for example `[5.0, 15.0]`). Exit code: `0` match, `1` no match or a failed file, `2` invalid arguments. Segments are matched without regard to order, so padding and edits do not count as differences; silent segments are skipped.
 
 ### FAFO cache (Fast-Fourier Audio Fingerprinting Offline)
 
@@ -130,6 +143,9 @@ With `--pair`, one line: `{"a": {...}, "b": {...}, "plot_db": 0.84, "missing": [
 
 - `fingerprints`: v1 hash and v2 sub-fingerprints for each library file, keyed by path, size, modification time and algorithm version. A changed file is recomputed automatically.
 - `results`: stored comparison records for `--resume`, keyed by file state and options (`country`, `audio`, services). Errors and failed preview fetches are never stored, so they are retried.
+- `spectra`: xv3 spectra (whole-file plot, every 10-second window in hundredths of a dB, about 20 KB per 4-minute track), keyed by file state and the xv3 recipe.
+
+**`--folder-chunk`** (for `fingerprint`, `compare`, `xv3` and `stats`) uses one database per album folder instead, beside `--index`: `%FAFO_DIR%\<album folder name>.sqlite3`. The folder name is Unicode-normalized (NFC) and then encoded like JavaScript's `escape()` over UTF-16 code units, with `;` in place of `%`: `Post Malone` → `Post;20Malone`, `¥$` → `;A5;24`, `カニエ` → `;u30AB;u30CB;u30A8`, `a;b` → `a;3Bb`. Case is kept, and a trailing `.` becomes `;2E` because Windows drops it. Folders with the same name (the same album title by different artists) share a database. A file directly inside an artist folder uses the artist folder's name. The first time a chunk database is created, its folder's entries are copied over from `library-index.sqlite3`, so nothing is decoded again; the single index is opened read-only and left in place. Without `--folder-chunk`, everything stays in the single index. `stats --folder-chunk` totals every chunk database.
 
 Every file commits on its own, so an interrupted run loses at most one file. The cache can be deleted at any time and rebuilt. Fingerprints are reused whichever engine (NumPy or pure Python) made them; the two are parity-tested and measured bit-identical. Run one writer at a time against a cache file.
 
@@ -150,10 +166,12 @@ Record shape (`status` is `mismatch`, `ok`, `unresolved` or `error`):
  "reference": {"service": "apple", "id": "1761882999", "url": "https://music.apple.com/us/album/..."},
  "audio": {"service": "apple", "ber": 0.354, "preview_at": 45.0},
  "status": "mismatch",
- "mismatches": [{"code": "DURATION", "library": 233.1, "service": 220.2, "delta": -12.9}]}
+ "mismatches": [{"code": "DURATION", "library": 233.1, "service": 220.2, "delta": -12.9}],
+ "checked": "2026-10-29T05:12:40+00:00"}
 ```
 
-- `unresolved` records are just `{"file": ..., "status": "unresolved"}`; `error` records are `{"file": ..., "status": "error", "error": "message"}`.
+- `unresolved` records are just `{"file": ..., "status": "unresolved", "checked": ...}`; `error` records are `{"file": ..., "status": "error", "error": "message", "checked": ...}`.
+- `checked` (every record, file and album, added 2026-10-28 for PyLy) is when the file was really compared, ISO 8601 UTC. A record reused by `--resume` keeps its original time, so a caller can skip stale records. `file` and `folder` are absolute paths spelled as on disk.
 - `audio` is present only when a preview was checked. `ber` is the bit error rate (0 = identical, about 0.5 = unrelated); `preview_at` is where the preview starts in the library file, in seconds. If the preview could not be checked, `audio` is `{"service": ..., "error": "message"}` and the metadata mismatches are still reported.
 
 | `code` | Meaning | Extra fields |
@@ -223,13 +241,37 @@ For a non-local bind, set `AUDIO_SIG_API_TOKEN` before starting the service. The
 
 The default matching threshold is 24 differing bits out of 168 (14.3%); `AUDIO_SIG_MAX_DISTANCE` changes it. If two distinct roots are within the threshold and within five bits of the best match, the API returns `ambiguous` rather than silently merging. Tune using known same-recording and different-recording pairs.
 
+### Flowerbed roots
+
+By default a root is random, issued by the registry. A **flowerbed** root is derived from the file's own tags instead, so the same song gets the same root on every machine without asking a registry:
+
+```
+key  = <ARTIST>/<TITLE>/<YYYY.MM>
+root = SHA-1("flowerbed-v1\n" + key)        20 bytes, the size of any root
+```
+
+- **Artist**: the track artist tag; multiple artists are trimmed and joined by `;`. **Title**: the title tag. **Date**: the date tag (`year` or `original date` if there is none) as `YYYY.MM`; a year alone means January (`2019` → `2019.01`). Values come only from the file's metadata, never from folder or file names or a service; a file missing any of the three has no flowerbed key.
+- **Normalization**: Unicode NFC, UPPERCASE, whitespace runs reduced to one space, and no spaces touching punctuation (Unicode `P*` characters; symbols such as `$` keep their spaces): `Ty Dolla $ign , Ye` → `TY DOLLA $IGN,YE`, `Song ( Remix )` → `SONG(REMIX)`.
+- The album is left out on purpose: an artist rarely releases two songs with the same title in the same month. Two versions of a song (a remix, a radio edit) only get different roots if their titles differ.
+- The `flowerbed-v1` prefix versions the recipe. Changing anything about it means a new prefix, so old and new roots never collide by accident.
+
+**In the registry** (`flowerbed` field on `/fingerprints/resolve`, or `scan_folder.py --flowerbed`), each root records its scheme (`random` or `flowerbed-v1`), and audio and tags are reconciled without ever merging two existing identities:
+
+| Situation | Result |
+|---|---|
+| No audio match; tag root unknown | `created` with the tag root |
+| No audio match; tag root already known | `rooted`: joins it (the same tags are the same song) |
+| Audio matches a **random** root; tag root unknown | `matched`/`existing`: keeps the random root and records the tag root as its alias |
+| Audio matches the root the tags give (or its alias) | `matched`/`existing` |
+| Audio matches one root, tags point to another | `ambiguous` with `"reason": "tags"` and both candidates (`via: "audio"`, `via: "tags"`); nothing is written |
+
 ### Scan a folder
 
 ```sh
 python scan_folder.py "D:\\Music" --registry http://127.0.0.1:8765 --jsonl scan-results.jsonl
 ```
 
-Optional bearer token: set `AUDIO_SIG_API_TOKEN` in the environment or pass `--token`. The scanner recursively considers common audio extensions and emits one JSON record per file. Failed files are reported without stopping the scan. Unlike `compare.py`, the scanner registers fingerprints in the registry.
+Optional bearer token: set `AUDIO_SIG_API_TOKEN` in the environment or pass `--token`. The scanner recursively considers common audio extensions and emits one JSON record per file. Failed files are reported without stopping the scan. Unlike `compare.py`, the scanner registers fingerprints in the registry. `--flowerbed` sends each file's [flowerbed root](#flowerbed-roots) and adds its `flowerbed` key to the record.
 
 ### Browser usage
 
@@ -243,7 +285,7 @@ Use an authenticated same-origin proxy for `/api/audio-registry`; don't put a pr
 
 ### Registry API
 
-- `POST /fingerprints/resolve` — body: `{ "perceptual": "<30 chars>", "algorithm": "asfp-v1", "duration": 12.3, "rms": 0.1, "source": "optional label" }`. Returns `created`, `matched`, `existing`, or `ambiguous`.
+- `POST /fingerprints/resolve` — body: `{ "perceptual": "<30 chars>", "algorithm": "asfp-v1", "duration": 12.3, "rms": 0.1, "source": "optional label", "flowerbed": "<29-char root, optional>" }`. Returns `created`, `matched`, `existing`, `rooted` (flowerbed only), or `ambiguous`.
 - `GET /fingerprints/{perceptual}` — retrieve a registered fingerprint.
 - `POST /fingerprints/aliases` — explicitly attach a new perceptual fingerprint to an existing root: `{ "perceptual": "<30 chars>", "root": "<29 chars>", "source": "reviewed alias" }`.
 
@@ -268,4 +310,4 @@ Tests use fake services and temporary folders; they make no network requests and
 - A renamed track on the service (for example MAYBE in the library vs FOREVER on Apple) comes back `unresolved` per file; with `--album-checks` it shows up in the album's `TRACKLIST` as missing + extra.
 - Album checks compare with MusicBrainz's newest Official worldwide release; if MusicBrainz lacks the album or its newest edition, the album is `unresolved` or compared with an older edition.
 - `--resume` reuses stored results without re-asking the service, so catalogue changes since the stored run are not seen. Run without `--resume` for a fresh check.
-- Registry: the root is a random registry-issued identity, not a content-derived hash; all clients must consult the same registry. Threshold 24 is an initial heuristic. The standard-library HTTP server is suitable for local development only.
+- Registry: by default the root is a random registry-issued identity, so all clients must consult the same registry; flowerbed roots (from tags) avoid that but are only as good as the tags. The browser module does not compute flowerbed roots yet. Threshold 24 is an initial heuristic. The standard-library HTTP server is suitable for local development only.

@@ -26,9 +26,12 @@ FLOOR_DB = 40.0              # window bands this far below the window's loudest 
 TILT_DB_PER_OCTAVE = -5.0    # typical music slope (library mean -5.0, SD 0.7); codes store the residual
 STEP_DB = 1.0                # plot quantization: 32 levels x 1 dB = +/-16 dB around the tilt
 LEVEL_BITS = 5
-PLOT_JOIN = "$"              # reserved for --plot-signed (plot $ flowerbed root); not used yet
+PLOT_JOIN = "-"              # --plot-signed: "<plot code>-<flowerbed root>" ('-' is not in the base-49 alphabet)
 PLOT_MAX_DB = 1.0            # provisional: largest whole-file plot distance for "same song" (PLAN.md §9.3)
 SECTION_MAX_DB = 1.5         # provisional: largest segment distance for "same section" (PLAN.md §9.3)
+TRIM_DB = 20.0               # intro/outro steps this far below the file's loud level are left out of the grid
+TRIM_MAX_SECONDS = 10        # ... but never more than this from either end (operator ruling 2026-10-28)
+TRIM_LOUD_PERCENTILE = 0.9   # the file's "loud level": this percentile of its STEP_SECONDS block levels
 
 
 def band_edges() -> list[int]:
@@ -56,6 +59,8 @@ class Spectrum:
     plot: list[float]                       # whole-file dB per band, relative to its mean
     segments: list[list[float] | None]      # same (floored at FLOOR_DB), per SEGMENT_SECONDS grid; None where silent
     windows: list[list[float] | None]       # same, SEGMENT_SECONDS long, starting every STEP_SECONDS
+    starts: list[float]                     # start of each grid segment, seconds (the grid begins after a quiet intro)
+    trimmed: tuple[float, float] = (0.0, 0.0)   # quiet intro and outro seconds left out of the grid
 
 
 def _relative(db: list[float], floor: float | None = None) -> list[float]:
@@ -99,8 +104,24 @@ def _band_power_python(samples) -> list[list[float]]:
     return rows
 
 
-def analyze(samples, accel: bool = True) -> Spectrum:
-    """Spectrum of mono float PCM at RATE. `accel` uses NumPy when installed (same result, float64)."""
+def _quiet_edges(cum, n_samples: int, trim_db: float | None) -> tuple[int, int]:
+    """Leading and trailing STEP_SECONDS blocks quieter than the loud level minus `trim_db`, each capped
+    at TRIM_MAX_SECONDS. Fades, noise beds and count-ins differ most between encodes and edits."""
+    step = int(STEP_SECONDS * RATE)
+    count = n_samples // step
+    if trim_db is None or count < 2:
+        return 0, 0
+    levels = [10 * math.log10((cum[(k + 1) * step] - cum[k * step]) / step + 1e-20) for k in range(count)]
+    quiet = sorted(levels)[int(TRIM_LOUD_PERCENTILE * (count - 1))] - trim_db
+    cap = round(TRIM_MAX_SECONDS / STEP_SECONDS)
+    lead = next((k for k, x in enumerate(levels[:cap]) if x >= quiet), min(cap, count))
+    tail = next((k for k, x in enumerate(levels[::-1][:cap]) if x >= quiet), min(cap, count))
+    return lead, tail
+
+
+def analyze(samples, accel: bool = True, trim_db: float | None = TRIM_DB) -> Spectrum:
+    """Spectrum of mono float PCM at RATE. `accel` uses NumPy when installed (same result, float64).
+    `trim_db` None keeps quiet intros and outros in the grid."""
     if len(samples) < FFT_SIZE:
         raise ValueError(f"Audio must be at least {FFT_SIZE / RATE:.3f} seconds")
     np = _numpy() if accel else None
@@ -131,13 +152,18 @@ def analyze(samples, accel: bool = True) -> Spectrum:
     loud = [l > f and e / (b - a) > floor for (f, l), e, (a, b) in zip(spans, energy, bounds)]
     windows = [_relative(_db(p, l - f), FLOOR_DB) if ok else None for p, (f, l), ok in zip(sums, spans, loud)]
     per = round(SEGMENT_SECONDS / STEP_SECONDS)
-    # Grid segments are every per-th window; the whole-file plot pools their frames (silent ones left out).
-    grid = range(0, len(windows), per)
+    # Grid segments are every per-th window from the end of a quiet intro, stopping before a quiet outro;
+    # the whole-file plot pools their frames (silent ones left out). Every window stays a match candidate.
+    lead, tail = _quiet_edges(cum, len(samples), trim_db)
+    limit = len(samples) - tail * int(STEP_SECONDS * RATE)
+    grid = [i for i in range(min(lead, len(windows) - 1), len(windows), per) if bounds[i][1] <= limit] \
+        or [min(lead, len(windows) - 1)]
     if not any(loud[i] for i in grid):
         raise ValueError("Audio is silent or too quiet to plot")
     total = [sum(sums[i][k] for i in grid if loud[i]) for k in range(BANDS)]
     frames = sum(spans[i][1] - spans[i][0] for i in grid if loud[i])
-    return Spectrum(len(samples) / RATE, _relative(_db(total, frames)), [windows[i] for i in grid], windows)
+    return Spectrum(len(samples) / RATE, _relative(_db(total, frames)), [windows[i] for i in grid], windows,
+                    [bounds[i][0] / RATE for i in grid], (lead * STEP_SECONDS, tail * STEP_SECONDS))
 
 
 def encode_plot(plot: list[float]) -> str:
@@ -147,6 +173,47 @@ def encode_plot(plot: list[float]) -> str:
     for n in levels:
         packed = packed << LEVEL_BITS | n
     return encode_bytes((packed << (PLOT_BYTES * 8 - BANDS * LEVEL_BITS)).to_bytes(PLOT_BYTES, "big"))
+
+
+def plot_signature(plot: list[float], root: bytes) -> str:
+    """--plot-signed: plot code and flowerbed root joined by PLOT_JOIN (48 + 1 + 29 = 78 characters)."""
+    return f"{encode_plot(plot)}{PLOT_JOIN}{encode_bytes(root)}"
+
+
+# Cache key: any change to the recipe below makes cached spectra stale (recomputed, never mixed).
+RECIPE = (f"{ALGORITHM}:{RATE}:{FFT_SIZE}:{LOW_HZ:g}-{HIGH_HZ:g}/{BANDS_PER_OCTAVE}:{SEGMENT_SECONDS}/{STEP_SECONDS:g}"
+          f":{SILENT_DBFS:g}:{FLOOR_DB:g}:trim{TRIM_DB:g}/{TRIM_MAX_SECONDS}/{TRIM_LOUD_PERCENTILE:g}")
+_CENTI = 100            # cached windows: int16 hundredths of a dB (error <= 0.005 dB, about 20 KB per 4-minute track)
+_SILENT_ROW = -32768
+
+
+def _le(data: array.array) -> bytes:
+    if sys.byteorder != "little": data.byteswap()
+    return data.tobytes()
+
+
+def _from_le(code: str, blob: bytes) -> array.array:
+    data = array.array(code); data.frombytes(blob)
+    if sys.byteorder != "little": data.byteswap()
+    return data
+
+
+def to_blobs(spectrum: Spectrum) -> tuple[bytes, bytes, bytes]:
+    """(plot float64, windows int16 centi-dB with silent rows marked, grid window indices uint16) for the index."""
+    rows = array.array("h")
+    for w in spectrum.windows:
+        rows.extend([_SILENT_ROW] * BANDS if w is None else
+                    [max(-32767, min(32767, round(x * _CENTI))) for x in w])
+    grid = array.array("H", [round(t / STEP_SECONDS) for t in spectrum.starts])
+    return _le(array.array("d", spectrum.plot)), _le(rows), _le(grid)
+
+
+def from_blobs(duration: float, plot: bytes, windows: bytes, grid: bytes, trimmed: tuple[float, float]) -> Spectrum:
+    rows = _from_le("h", windows)
+    wins = [None if rows[i] == _SILENT_ROW else [x / _CENTI for x in rows[i:i + BANDS]] for i in range(0, len(rows), BANDS)]
+    idx = _from_le("H", grid).tolist()
+    return Spectrum(duration, _from_le("d", plot).tolist(), [wins[i] for i in idx], wins,
+                    [i * STEP_SECONDS for i in idx], tuple(trimmed))
 
 
 def decode_plot(text: str) -> list[float]:
@@ -181,7 +248,7 @@ def unmatched(a: Spectrum, b: Spectrum, max_db: float, weights: list[float] | No
 
 def section_diff(a: Spectrum, b: Spectrum, max_db: float, weights: list[float] | None = None) -> dict:
     """Sections of a not heard in b ("missing" from b) and of b not heard in a ("extra"), as seconds."""
-    span = lambda i, s: [i * SEGMENT_SECONDS, round(min((i + 1) * SEGMENT_SECONDS, s.duration), 1)]
+    span = lambda i, s: [round(s.starts[i], 2), round(min(s.starts[i] + SEGMENT_SECONDS, s.duration), 1)]
     return {"missing": [span(i, a) for i in unmatched(a, b, max_db, weights)],
             "extra": [span(i, b) for i in unmatched(b, a, max_db, weights)]}
 

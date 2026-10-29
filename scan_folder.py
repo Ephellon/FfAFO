@@ -38,7 +38,10 @@ def main():
     ap.add_argument("--registry", default="http://127.0.0.1:8765")
     ap.add_argument("--token", default=os.environ.get("AUDIO_SIG_API_TOKEN", ""))
     ap.add_argument("--jsonl", type=Path, help="Write one JSON result per file")
+    ap.add_argument("--flowerbed", action="store_true", help="Root identities in the file's own tags (PLAN.md §9.2)")
     args = ap.parse_args()
+    if args.flowerbed:
+        import compare, flowerbed   # compare imports this module, so not at the top
     if not args.folder.is_dir(): ap.error(f"Not a folder: {args.folder}")
     files = sorted(p for p in args.folder.rglob("*") if p.is_file() and p.suffix.lower() in EXTENSIONS)
     out = args.jsonl.open("w", encoding="utf-8") if args.jsonl else None
@@ -47,11 +50,13 @@ def main():
             try:
                 samples, duration, rms = decode_audio(path)
                 fp = fingerprint(samples)
-                result = post_json(args.registry.rstrip("/") + "/fingerprints/resolve", {
-                    "perceptual": encode_bytes(fp), "algorithm":"asfp-v1", "duration":round(duration, 3),
-                    "rms":round(rms, 8), "source":str(path.resolve())
-                }, args.token)
-                record = {"file":str(path), **result}
+                payload = {"perceptual": encode_bytes(fp), "algorithm":"asfp-v1", "duration":round(duration, 3),
+                           "rms":round(rms, 8), "source":str(path.resolve())}
+                key = compare.probe(path).flowerbed if args.flowerbed else None
+                if key:
+                    payload["flowerbed"] = flowerbed.root_text(key)
+                result = post_json(args.registry.rstrip("/") + "/fingerprints/resolve", payload, args.token)
+                record = {"file":str(path), **({"flowerbed": key} if args.flowerbed else {}), **result}
             except Exception as exc:
                 record = {"file":str(path), "status":"error", "error":str(exc)}
             line = json.dumps(record, ensure_ascii=False)

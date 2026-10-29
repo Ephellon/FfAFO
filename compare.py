@@ -5,12 +5,14 @@ Reports mismatches only. Never writes to the scanned folder or the registry and 
 from __future__ import annotations
 import argparse, array, json, re, subprocess, sys
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Protocol
 from urllib.parse import urlparse
+import flowerbed
 from audio_sig import HOP_SIZE, TARGET_RATE, align_excerpt, subfingerprints
 from envfile import load_env
-from library_index import INDEX_PATH, LibraryIndex
+from library_index import INDEX_PATH, ChunkedIndex, LibraryIndex
 from scan_folder import EXTENSIONS, decode_audio
 
 DURATION_TOLERANCE = 2.0     # seconds; recalibrate against real service data (PLAN.md §7.5)
@@ -41,6 +43,7 @@ class LibraryTrack:
     mb_album_id: str | None = None           # MusicBrainz release the file is tagged with
     mb_release_group_id: str | None = None
     mb_album_status: str | None = None       # e.g. "official", "withdrawn" (as tagged)
+    flowerbed: str | None = None             # "ARTIST/TITLE/YYYY.MM" from tags (flowerbed.py); None if any is untagged
 
 
 @dataclass(frozen=True)
@@ -152,6 +155,7 @@ def parse_probe(path: str, data: dict) -> LibraryTrack:
         mb_album_id=_first(tags, "musicbrainz album id", "musicbrainz_albumid"),
         mb_release_group_id=_first(tags, "musicbrainz release group id", "musicbrainz_releasegroupid"),
         mb_album_status=(_first(tags, "musicbrainz album status", "releasestatus", "musicbrainz_albumstatus") or "").lower() or None,
+        flowerbed=flowerbed.key_from_tags(tags),
     )
 
 
@@ -219,14 +223,14 @@ def check_track(track: LibraryTrack, ref: ServiceTrack, duration_tolerance: floa
     return out
 
 
-def decode_url(url: str, seconds: int = PREVIEW_SECONDS) -> list[float]:
+def decode_url(url: str, seconds: int = PREVIEW_SECONDS, rate: int = TARGET_RATE) -> list[float]:
     """Stream at most `seconds` of a remote preview through FFmpeg into memory; nothing touches disk."""
     parsed = urlparse(url)
     if parsed.scheme != "https" or not (parsed.hostname or "").endswith(PREVIEW_HOSTS):
         raise ValueError(f"Refusing preview URL outside allowed hosts: {url}")
     # The whitelist stops a crafted URL from making FFmpeg open local files or other protocols.
     cmd = ["ffmpeg", "-v", "error", "-nostdin", "-protocol_whitelist", "https,tls,tcp", "-t", str(seconds), "-i", url,
-           "-vn", "-ac", "1", "-ar", str(TARGET_RATE), "-f", "f32le", "-acodec", "pcm_f32le", "pipe:1"]
+           "-vn", "-ac", "1", "-ar", str(rate), "-f", "f32le", "-acodec", "pcm_f32le", "pipe:1"]
     proc = subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
     if proc.returncode:
         raise RuntimeError(proc.stderr.decode("utf-8", "replace").strip() or "FFmpeg preview decode failed")
@@ -368,6 +372,8 @@ def main(argv: list[str] | None = None, adapters: list[Adapter] | None = None, p
     ap.add_argument("--no-numpy", action="store_true",
                     help="Methodical mode: pure-Python FFT for new fingerprints (about 30x slower, same output)")
     ap.add_argument("--no-index", action="store_true", help="Do not cache library fingerprints")
+    ap.add_argument("--folder-chunk", action="store_true",
+                    help="One cache per album folder, beside --index; the first use copies entries from --index")
     ap.add_argument("--index-only", action="store_true", help="Only fingerprint library files into the index (no network)")
     ap.add_argument("--resume", action="store_true",
                     help="Keep each file's result in the index; later --resume runs reuse it for unchanged files")
@@ -391,7 +397,7 @@ def main(argv: list[str] | None = None, adapters: list[Adapter] | None = None, p
         ap.error("--album-checks needs MusicBrainz")
     if not args.no_index and any(_inside(args.index, r) for r in roots):
         ap.error("--index must be outside the scanned folder (the library is read-only)")
-    index = None if args.no_index else LibraryIndex(args.index, accel=not args.no_numpy)
+    index = open_index(args.index, not args.no_numpy, args.folder_chunk) if not args.no_index else None
     musicbrainz = None
     try:
         if args.index_only:
@@ -405,6 +411,16 @@ def main(argv: list[str] | None = None, adapters: list[Adapter] | None = None, p
     finally:
         if index: index.close()
         if musicbrainz: musicbrainz.close()
+
+
+def _checked_now() -> str:
+    """`checked` on every record: when it was really compared, ISO 8601 UTC (PyLy skips stale records)."""
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def open_index(path: Path, accel: bool, folder_chunk: bool) -> LibraryIndex | ChunkedIndex:
+    """The single FAFO index, or with --folder-chunk one per album folder beside it (seeded from it)."""
+    return ChunkedIndex(path.parent, accel, source=path) if folder_chunk else LibraryIndex(path, accel)
 
 
 def build_index(files: list[Path], index: LibraryIndex, progress: bool = False) -> int:
@@ -433,6 +449,7 @@ def _run(args, files: list[Path], adapters: list[Adapter], index: LibraryIndex |
     out = args.report.open("w", encoding="utf-8") if args.report else None
 
     def emit(record: dict) -> None:
+        record.setdefault("checked", _checked_now())   # album records are checked as they are emitted
         show = (record["status"] in ("mismatch", "error")
                 or (record["status"] == "unresolved" and args.show_unresolved)
                 or (record["status"] == "ok" and args.verbose))
@@ -454,6 +471,7 @@ def _run(args, files: list[Path], adapters: list[Adapter], index: LibraryIndex |
                     record = compare(track, adapters, audio=not args.no_audio, index=index, accel=not args.no_numpy)
                 except Exception as exc:
                     record = {"file": str(path), "status": "error", "error": str(exc)}
+                record["checked"] = _checked_now()   # reused records keep the time they were really checked
                 # Errors (including a failed preview fetch) are not stored, so the next run retries them.
                 if args.resume and record["status"] != "error" and "error" not in record.get("audio", {}):
                     index.save_result(str(path), options, record)
