@@ -109,10 +109,16 @@ class TracklistTests(unittest.TestCase):
         files = [track("One", 1), track("Three", 2), track("Bonus", 4), track("Bonus", 4, path="04 Bonus.m4a")]
         [m] = tracklist_check(files, self.REF)
         self.assertEqual((m["code"], m["library_count"], m["service_count"]), ("TRACKLIST", 4, 3))
-        self.assertEqual(m["missing"], ["1-2 Two"])
+        self.assertEqual(m["missing"], ["02 Two"])
         self.assertEqual(m["extra"], ["04 Bonus.m4a", "04 Bonus.mp3"])
         self.assertEqual(m["duplicates"], ["Bonus"])
         self.assertEqual(m["moved"], [{"title": "Three", "library": "1-2", "service": "1-3"}])
+
+    def test_missing_named_like_library_files_on_multi_disc(self):
+        ref = {"media": [{"position": 1, "tracks": [{"position": 1, "title": "One"}]},
+                         {"position": 2, "tracks": [{"position": 1, "title": "Dose"}]}]}
+        [m] = tracklist_check([track("One", 1)], ref)
+        self.assertEqual(m["missing"], ["01 Dose (CD 02)"])
 
     def test_withdrawn_release_flagged(self):
         mb = mock.Mock(reference_release=mock.Mock(return_value=self.REF))
@@ -155,7 +161,7 @@ class AlbumChecksCliTests(unittest.TestCase):
             records = [json.loads(l) for l in out.getvalue().splitlines()]
             self.assertEqual(code, 1)
             self.assertEqual([r.get("album") for r in records], ["Album"])
-            self.assertEqual(records[0]["mismatches"][0]["missing"], ["1-3 Three"])
+            self.assertEqual(records[0]["mismatches"][0]["missing"], ["03 Three"])
             self.assertIn('"albums": {"ok": 0, "mismatch": 1', err.getvalue())
             fake_mb.close.assert_called_once()
 

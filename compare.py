@@ -3,7 +3,7 @@
 Reports mismatches only. Never writes to the scanned folder or the registry and never saves audio.
 """
 from __future__ import annotations
-import argparse, array, json, re, subprocess, sys
+import argparse, array, json, os, re, subprocess, sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -293,15 +293,22 @@ def _position(disc: int | None, track: int | None) -> str:
     return f"{disc or 1}-{track if track is not None else '?'}"
 
 
+def _file_name(disc: int, track: int | None, title: str, discs: int) -> str:
+    """A reference track named like the library files: `NN Title`, or `NN Title (CD DD)` on a multi-disc release."""
+    name = f"{track:02d} {title}" if track is not None else f"?? {title}"
+    return f"{name} (CD {disc:02d})" if discs > 1 else name
+
+
 def tracklist_check(tracks: list[LibraryTrack], release: dict) -> list[dict]:
     """Album-level mismatches of the library files against a MusicBrainz release (with recordings)."""
     ref = [(m.get("position") or 1, t.get("position"), t.get("title", "")) for m in release.get("media", [])
            for t in m.get("tracks", [])]
+    discs = len(release.get("media", []))
     ref_by_title = {normalize_title(title)[0]: (disc, pos, title) for disc, pos, title in ref}
     lib_by_title: dict[str, list[LibraryTrack]] = {}
     for t in tracks:
         lib_by_title.setdefault(normalize_title(t.title)[0], []).append(t)
-    missing = [f"{_position(d, p)} {title}" for d, p, title in ref if normalize_title(title)[0] not in lib_by_title]
+    missing = [_file_name(d, p, title, discs) for d, p, title in ref if normalize_title(title)[0] not in lib_by_title]
     extra = sorted(Path(t.path).name for base, ts in lib_by_title.items() if base not in ref_by_title for t in ts)
     duplicates = sorted(ts[0].title for ts in lib_by_title.values() if len(ts) > 1)
     moved = [{"title": ts[0].title, "library": _position(ts[0].disc, ts[0].track), "service": _position(*ref_by_title[base][:2])}
@@ -362,7 +369,13 @@ def collect_files(paths: Iterable[Path]) -> tuple[list[Path], list[Path]]:
 def main(argv: list[str] | None = None, adapters: list[Adapter] | None = None, prog: str | None = None) -> int:
     ap = argparse.ArgumentParser(prog=prog, description=__doc__)
     ap.add_argument("paths", nargs="+", type=Path, metavar="path", help="Library folder(s) or audio file(s)")
-    ap.add_argument("--report", type=Path, help="Also write output records to this JSONL file (must be outside the folder)")
+    ap.add_argument("--report", type=Path,
+                    help="Also write output records to this JSONL file (must be outside the folder); "
+                         "replaced in one step when the run finishes")
+    ap.add_argument("--run-status", type=Path,
+                    help="Write {started, finished, exit, records} to this JSON file; finished stays null until the run ends")
+    ap.add_argument("--granular", action="store_true",
+                    help="Add each file's size and mtime as FAFO saw them (consumers drop records for files changed since)")
     ap.add_argument("--verbose", action="store_true", help="Also emit tracks that matched cleanly")
     ap.add_argument("--show-unresolved", action="store_true", help="Also emit tracks no service could match")
     ap.add_argument("--country", default="US", help="Storefront country code for catalogue lookups")
@@ -389,8 +402,9 @@ def main(argv: list[str] | None = None, adapters: list[Adapter] | None = None, p
         files, roots = collect_files(args.paths)
     except ValueError as exc:
         ap.error(str(exc))
-    if args.report and any(_inside(args.report, r) for r in roots):
-        ap.error("--report must be outside the scanned folder (the library is read-only)")
+    for name in ("report", "run_status"):
+        if getattr(args, name) and any(_inside(getattr(args, name), r) for r in roots):
+            ap.error(f"--{name.replace('_', '-')} must be outside the scanned folder (the library is read-only)")
     if args.no_index and (args.resume or args.index_only):
         ap.error("--resume and --index-only need the index")
     if args.album_checks and args.no_musicbrainz:
@@ -416,6 +430,24 @@ def main(argv: list[str] | None = None, adapters: list[Adapter] | None = None, p
 def _checked_now() -> str:
     """`checked` on every record: when it was really compared, ISO 8601 UTC (PyLy skips stale records)."""
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _file_state(path: Path) -> dict:
+    """--granular `size` and `mtime` (ISO 8601 UTC, microseconds) FAFO saw; PyLy drops a record when the file
+    no longer matches. Also used, with or without --granular, to recheck a file that changed while it was checked."""
+    st = path.stat()
+    return {"size": st.st_size, "mtime": datetime.fromtimestamp(st.st_mtime, timezone.utc).isoformat(timespec="microseconds")}
+
+
+def _write_atomic(path: Path, text: str) -> None:
+    """Readers see the old file or the new one, never half of it."""
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _write_status(path: Path | None, status: dict) -> None:
+    if path: _write_atomic(path, json.dumps(status) + "\n")
 
 
 def open_index(path: Path, accel: bool, folder_chunk: bool) -> LibraryIndex | ChunkedIndex:
@@ -445,10 +477,15 @@ def _run(args, files: list[Path], adapters: list[Adapter], index: LibraryIndex |
     counts = {"ok": 0, "mismatch": 0, "unresolved": 0, "error": 0}
     # Stored results are only reused under identical options; changing services or flags rechecks everything.
     options = {"country": args.country, "audio": not args.no_audio, "services": [a.name for a in adapters]}
-    reused, tracks = 0, []
-    out = args.report.open("w", encoding="utf-8") if args.report else None
+    reused, tracks, written = 0, [], 0
+    status = {"started": _checked_now(), "finished": None, "exit": None, "records": 0}
+    _write_status(args.run_status, status)
+    # The report is written beside its final name and swapped in only when the run completes.
+    partial = args.report.with_name(args.report.name + ".tmp") if args.report else None
+    out = partial.open("w", encoding="utf-8") if partial else None
 
     def emit(record: dict) -> None:
+        nonlocal written
         record.setdefault("checked", _checked_now())   # album records are checked as they are emitted
         show = (record["status"] in ("mismatch", "error")
                 or (record["status"] == "unresolved" and args.show_unresolved)
@@ -457,24 +494,44 @@ def _run(args, files: list[Path], adapters: list[Adapter], index: LibraryIndex |
             line = json.dumps(record, ensure_ascii=False)
             print(line, file=sys.stderr if record["status"] == "error" else sys.stdout)
             if out: out.write(line + "\n")
+            written += 1
+
+    def check(path: Path) -> tuple[LibraryTrack | None, dict]:
+        try:
+            track = probe(path)
+            return track, compare(track, adapters, audio=not args.no_audio, index=index, accel=not args.no_numpy)
+        except Exception as exc:
+            return None, {"file": str(path), "status": "error", "error": str(exc)}
 
     try:
         for n, path in enumerate(files, 1):
             if args.progress: print(f"[{n}/{len(files)}] {path}", file=sys.stderr, flush=True)
-            record = index.result(str(path), options) if args.resume else None
-            track = None
-            if record is not None:
-                reused += 1
-            else:
-                try:
-                    track = probe(path)
-                    record = compare(track, adapters, audio=not args.no_audio, index=index, accel=not args.no_numpy)
-                except Exception as exc:
-                    record = {"file": str(path), "status": "error", "error": str(exc)}
+            track, record = None, None
+            try:
+                state = _file_state(path)
+            except OSError as exc:
+                state, record = None, {"file": str(path), "status": "error", "error": str(exc)}
+            if record is None and args.resume:
+                record = index.result(str(path), options)
+                if record is not None: reused += 1
+            if record is None:
+                # A file written while it is checked (PyLy can still be running) is checked once more, then skipped.
+                for _ in range(2):
+                    track, record = check(path)
+                    try:
+                        after = _file_state(path)
+                    except OSError:
+                        after = None
+                    if after == state: break
+                    state = after
+                else:
+                    track, record = None, {"file": str(path), "status": "error", "error": "file changed while it was checked"}
                 record["checked"] = _checked_now()   # reused records keep the time they were really checked
                 # Errors (including a failed preview fetch) are not stored, so the next run retries them.
                 if args.resume and record["status"] != "error" and "error" not in record.get("audio", {}):
                     index.save_result(str(path), options, record)
+            if args.granular and state:
+                record.update(state)   # a reused result is keyed on this same size and mtime
             if musicbrainz is not None and track is None and record["status"] != "error":
                 try:
                     track = probe(path)   # album checks need tags even for results reused from the index
@@ -487,10 +544,13 @@ def _run(args, files: list[Path], adapters: list[Adapter], index: LibraryIndex |
         albums = _album_pass(tracks, musicbrainz, emit) if musicbrainz is not None else None
     finally:
         if out: out.close()
+    if partial: os.replace(partial, args.report)   # an interrupted run leaves the previous report in place
     summary = {"files": len(files), **counts, **({"reused": reused} if args.resume else {}),
                **({"albums": albums} if albums is not None else {})}
     print(json.dumps({"summary": summary}), file=sys.stderr)
-    return 1 if counts["mismatch"] or (albums and albums["mismatch"]) else 0
+    code = 1 if counts["mismatch"] or (albums and albums["mismatch"]) else 0
+    _write_status(args.run_status, {**status, "finished": _checked_now(), "exit": code, "records": written})
+    return code
 
 
 def _album_pass(tracks: list[LibraryTrack], musicbrainz, emit) -> dict:

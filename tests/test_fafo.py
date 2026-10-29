@@ -60,6 +60,9 @@ class FafoCliTests(unittest.TestCase):
         code, records, _ = self.fingerprint("--no-index")
         self.assertEqual([r["status"] for r in records], ["computed", "computed"])
         self.assertFalse(self.index.parent.exists())
+        code, records, _ = self.fingerprint("--no-index", "--granular", path=self.library / "02 Two.flac")
+        self.assertEqual(records[0]["size"], (self.library / "02 Two.flac").stat().st_size)
+        self.assertIn("mtime", records[0])
 
     def test_fingerprint_error_is_reported_and_exit_1(self):
         with mock.patch.object(library_index, "decode_audio", side_effect=RuntimeError("bad file")):

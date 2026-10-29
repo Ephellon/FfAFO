@@ -59,6 +59,7 @@ def fingerprint_main(argv: list[str], prog: str) -> int:
     ap.add_argument("--subfingerprints", action="store_true", help=f"Include the {ALGORITHM_V2} sequence (28-bit ints) per file")
     ap.add_argument("--flowerbed", action="store_true",
                     help="Add the tag-derived root: flowerbed key, root and full signature (null key if tags are incomplete)")
+    ap.add_argument("--granular", action="store_true", help="Add each file's size and mtime (ISO 8601 UTC) as FAFO saw them")
     ap.add_argument("--quiet", action="store_true", help="No per-file records on stdout; summary and errors only")
     ap.add_argument("--progress", action="store_true", help="Print [n/total] per file to stderr")
     args = ap.parse_args(argv)
@@ -76,6 +77,7 @@ def fingerprint_main(argv: list[str], prog: str) -> int:
             if args.progress: print(f"[{n}/{len(files)}] {path}", file=sys.stderr, flush=True)
             try:
                 record = fingerprint_record(path, index, not args.no_numpy, args.subfingerprints, args.flowerbed)
+                if args.granular: record.update(compare._file_state(path))
             except Exception as exc:
                 record = {"file": str(path), "status": "error", "error": str(exc)}
             counts[record["status"]] += 1
@@ -140,6 +142,7 @@ def xv3_main(argv: list[str], prog: str) -> int:
     ap.add_argument("--bands", action="store_true", help="Include the unquantized plot (dB per band, relative to its mean)")
     ap.add_argument("--plot-signed", action="store_true",
                     help=f"Add the plot joined to the flowerbed root by '{spectrum_sig.PLOT_JOIN}' (forces flowerbed)")
+    ap.add_argument("--granular", action="store_true", help="Add each file's size and mtime (ISO 8601 UTC) as FAFO saw them")
     ap.add_argument("--index", type=Path, default=INDEX_PATH, help=f"FAFO index, SQLite (default {INDEX_PATH})")
     ap.add_argument("--no-index", action="store_true", help="Compute only; do not read or write the index")
     ap.add_argument("--folder-chunk", action="store_true", help="One index per album folder, beside --index")
@@ -157,7 +160,10 @@ def xv3_main(argv: list[str], prog: str) -> int:
     if not args.no_index and any(compare._inside(args.index, r) for r in roots):
         ap.error("--index must be outside the scanned folder (the library is read-only)")
     index = None if args.no_index else compare.open_index(args.index, not args.no_numpy, args.folder_chunk)
-    record_of = lambda p: xv3_record(p, not args.no_numpy, args.bands, index, args.plot_signed)
+    def record_of(p: Path) -> tuple[dict, spectrum_sig.Spectrum]:
+        record, spectrum = xv3_record(p, not args.no_numpy, args.bands, index, args.plot_signed)
+        if args.granular: record.update(compare._file_state(p))
+        return record, spectrum
     try:
         if args.pair:
             (ra, a), (rb, b) = (record_of(p) for p in args.paths)

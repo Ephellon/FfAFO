@@ -202,6 +202,9 @@ CLI options, output records, mismatch codes and exit codes are documented in `RE
 - **`compare(track, adapters, audio=True, index=None, accel=True) -> dict`** — full record for one track. Audio failures go to `record["audio"]["error"]` and never hide metadata mismatches.
 - **`collect_files(paths) -> (files, roots)`** — sorted, de-duplicated audio files under any mix of folders and files, plus the folders that must stay read-only (a file protects its parent). Raises `ValueError` for missing paths or non-audio files.
 - **`build_index(files, index, progress)`** — `--index-only` loop.
+- **`tracklist_check(tracks, release)`** — `TRACKLIST`; `missing` named like library files (`NN Title`, `NN Title (CD DD)` on multi-disc releases).
+- **`_file_state(path)`** — `{size, mtime}` (ISO 8601 UTC, microseconds): `--granular` fields, and the mid-check change test (a changed file is checked once more, then skipped).
+- **`_write_atomic(path, text)`** — write `path.tmp`, then `os.replace`; used for `--run-status`. `--report` streams to `PATH.tmp` and is renamed when the run completes.
 - **`main(argv=None, adapters=None, prog=None) -> int`** — CLI (also `fafo.py compare`); `adapters` can be injected (tests use fakes).
 
 ## 7. `apple.py` — Apple Music adapter
@@ -291,10 +294,10 @@ python -m unittest discover -s tests -v
 ```
 
 - `test_audio_sig.py` — encoding round trips, v1 regression pin, v2 shape/alignment/half-hop recovery, NumPy parity (skipped without NumPy).
-- `test_compare.py` — ffprobe parsing, title normalization, mismatch rules, precedence, audio check (mocked), preview URL guard, CLI (temp library left untouched, `--report`/`--index` refused inside the folder, `--resume`, `--index-only`).
+- `test_compare.py` — ffprobe parsing, title normalization, mismatch rules, precedence, audio check (mocked), preview URL guard, CLI (temp library left untouched, `--report`/`--index` refused inside the folder, `--resume`, `--index-only`, `--granular` size/mtime, `--run-status`, report swapped in only on completion, file changed mid-check rechecked then skipped).
 - `test_apple.py` — adapter against recorded-style fake API responses (editions, artist filter, throttling).
 - `test_library_index.py` — cache hits, invalidation on change, results keyed by options, lazy creation; `--folder-chunk` names (escape() examples, surrogates, NFC, trailing dot), shared databases, first-use copy without decoding, chunk stats.
-- `test_fafo.py` — `fingerprint` (indexed then cached, single file, `--subfingerprints`, `--quiet`, `--no-index`, errors, refusals), `compare` delegation, `stats`, `xv3` (listing writes nothing with `--no-index`, spectra cached, `--plot-signed`, `--pair` match and added section), help and unknown services.
+- `test_fafo.py` — `fingerprint` (indexed then cached, single file, `--subfingerprints`, `--quiet`, `--no-index`, `--granular`, errors, refusals), `compare` delegation, `stats`, `xv3` (listing writes nothing with `--no-index`, spectra cached, `--plot-signed`, `--pair` match and added section), help and unknown services.
 - `test_spectrum_sig.py` — xv3 band layout and tilt, loudness independence, plot-code round trip and clamping, NumPy parity, added/missing sections, offset excerpts, window floor, silent segments, quiet-edge trim (capped at 10 s), cache blobs, plot signature, rejections, vocal weights.
 - `test_flowerbed.py` — normalization examples, artists, dates, key/root, tag-only probe; registry: flowerbed `created`/`rooted`, alias on a random root, tag conflict `ambiguous` with nothing written, unchanged behaviour without flowerbed, `scheme` migration.
 

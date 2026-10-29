@@ -55,7 +55,7 @@ Artist names match on whole words ("Ye" does not match inside "Kanye"); when tha
 
 ```sh
 python fafo.py fingerprint "R:\Local" --quiet --progress
-python fafo.py compare "R:\Local" --resume --progress --report "R:\FAFO\mismatches.jsonl"
+python fafo.py compare "R:\Local" --resume --album-checks --granular --progress --report "R:\FAFO\mismatches.jsonl" --run-status "R:\FAFO\last-run.json"
 python fafo.py compare "R:\Local\Artist\Album\04 Song.mp3"
 python fafo.py stats
 ```
@@ -72,6 +72,7 @@ Both `fingerprint` and `compare` can be interrupted and re-run: finished files a
 | `--flowerbed` | Add the tag-derived identity: `flowerbed` key, `root` and full `signature` (see [Flowerbed roots](#flowerbed-roots)) |
 | `--no-numpy` | Methodical mode: pure-Python FFT (same output, about 30× slower) |
 | `--subfingerprints` | Include the full `asfp-v2` sequence (list of 28-bit integers) in each record |
+| `--granular` | Add each file's `size` (bytes) and `mtime` (ISO 8601 UTC, microseconds) |
 | `--quiet` | No per-file records on stdout; errors and the summary only |
 | `--progress` | Print `[n/total] path` per file to stderr |
 
@@ -91,7 +92,9 @@ One JSON line per file on stdout (here with `--flowerbed`):
 | Option | Effect |
 |---|---|
 | `path...` | Library folder(s) and/or audio file(s). A single file's parent folder is treated as read-only too |
-| `--report PATH` | Also write the emitted records to this JSONL file (overwritten; must be outside the folder) |
+| `--report PATH` | Also write the emitted records to this JSONL file (must be outside the folder). Written as `PATH.tmp` and renamed over `PATH` only when the run completes, so a reader never sees half a report and an interrupted run leaves the previous one |
+| `--run-status PATH` | Write `{"started", "finished", "exit", "records"}` (ISO 8601 UTC times) to this JSON file: at the start with `finished`/`exit` `null`, again when the run completes. `records` is the number of emitted records |
+| `--granular` | Add `size` (bytes) and `mtime` (ISO 8601 UTC, microseconds) of each file as FAFO saw it, so a reader can drop records for files changed since |
 | `--verbose` | Also emit tracks that matched cleanly (`status: "ok"`) |
 | `--show-unresolved` | Also emit tracks no service could confidently match |
 | `--country CC` | Apple storefront, default `US`. Editions differ by storefront (e.g. the US store may only carry a clean edition) |
@@ -122,7 +125,7 @@ Not used by `compare`, and its thresholds are provisional until real-world testi
 | `--vocal-weight W` | Weight of bands centred in 60–1050 Hz (`0` ignores them; default `1`) |
 | `--bands` | Include the unquantized plot (`bands`: 52 dB values) |
 | `--plot-signed` | Add `plot_signed`: the plot code and the [flowerbed root](#flowerbed-roots) joined by `-` (forces flowerbed; also adds `flowerbed` and `root`) |
-| `--index PATH` / `--no-index` / `--folder-chunk` | Same as for `fingerprint` |
+| `--index PATH` / `--no-index` / `--folder-chunk` / `--granular` | Same as for `fingerprint` |
 | `--no-numpy` | Methodical mode: pure-Python FFT (same output, much slower) |
 | `--progress` | Print `[n/total] path` per file to stderr |
 
@@ -172,6 +175,8 @@ Record shape (`status` is `mismatch`, `ok`, `unresolved` or `error`):
 
 - `unresolved` records are just `{"file": ..., "status": "unresolved", "checked": ...}`; `error` records are `{"file": ..., "status": "error", "error": "message", "checked": ...}`.
 - `checked` (every record, file and album, added 2026-10-28 for PyLy) is when the file was really compared, ISO 8601 UTC. A record reused by `--resume` keeps its original time, so a caller can skip stale records. `file` and `folder` are absolute paths spelled as on disk.
+- With `--granular`, file records also carry `"size": 8123456, "mtime": "2026-10-28T20:15:03.123456+00:00"`: the file as FAFO saw it. `mtime` is `datetime.fromtimestamp(os.stat(path).st_mtime, timezone.utc).isoformat(timespec="microseconds")`, so a Python reader can compare the strings directly. Album records have neither (writing a `.lrc` changes a folder's mtime).
+- A file whose size or mtime changes while it is being checked is checked once more; if it changes again it is skipped as an `error` record (`"file changed while it was checked"`), which is not stored, so the next run retries it. This holds with or without `--granular`.
 - `audio` is present only when a preview was checked. `ber` is the bit error rate (0 = identical, about 0.5 = unrelated); `preview_at` is where the preview starts in the library file, in seconds. If the preview could not be checked, `audio` is `{"service": ..., "error": "message"}` and the metadata mismatches are still reported.
 
 | `code` | Meaning | Extra fields |
@@ -182,14 +187,14 @@ Record shape (`status` is `mismatch`, `ok`, `unresolved` or `error`):
 | `TITLE_VERSION` | Title version qualifiers differ (remaster, live, remix, edit, clean, deluxe, …) | `library`, `service` (sorted lists) |
 | `AUDIO` | The preview does not match the library audio (BER above 0.40) | `service`, `ber`, `threshold` |
 
-**Album records** (`--album-checks`) have `album`, `artist`, `folder` instead of `file`, a `musicbrainz` reference with `status` and `date`, and the same `status` values. The summary gains `"albums": {"ok", "mismatch", "unresolved", "error"}`, and an album mismatch also makes the exit code `1`.
+**Album records** (`--album-checks`) have `album`, `artist`, `folder` instead of `file`, a `musicbrainz` reference with `status` and `date`, and the same `status` values. `TRACKLIST` `missing` entries are named like the library files: `NN Title`, or `NN Title (CD DD)` on a multi-disc release; `moved` positions stay `disc-track`. The summary gains `"albums": {"ok", "mismatch", "unresolved", "error"}`, and an album mismatch also makes the exit code `1`.
 
 ```json
 {"album": "VULTURES 2", "artist": "¥$", "folder": "R:\\Local\\¥$\\VULTURES 2",
  "reference": {"service": "musicbrainz", "id": "efda4d75-…", "url": "https://musicbrainz.org/release/efda4d75-…", "status": "Official", "date": "2024-11-10"},
  "status": "mismatch",
  "mismatches": [{"code": "RELEASE_WITHDRAWN", "library": "3cc48778-…", "service": "efda4d75-…"},
-                {"code": "TRACKLIST", "library_count": 17, "service_count": 16, "missing": ["1-12 FOREVER"],
+                {"code": "TRACKLIST", "library_count": 17, "service_count": 16, "missing": ["12 FOREVER"],
                  "extra": ["09 MAYBE.mp3", "09 MAYBE.mp4"], "duplicates": ["MAYBE"],
                  "moved": [{"title": "530", "library": "1-12", "service": "1-7"}]}]}
 ```

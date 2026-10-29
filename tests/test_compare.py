@@ -267,6 +267,7 @@ class MainTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual([(Path(r["file"]).name, r["status"]) for r in records], [("02 Long.flac", "mismatch")])
         self.assertEqual(records[0]["mismatches"][0]["code"], "DURATION")
+        self.assertNotIn("size", records[0])                         # size and mtime need --granular
         self.assertRegex(records[0]["checked"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\+00:00$")
         self.assertIn('"unresolved": 1', err)
 
@@ -280,6 +281,43 @@ class MainTests(unittest.TestCase):
         self.run_main("--report", str(self.root / "report.jsonl"), "--verbose", "--show-unresolved")
         self.assertEqual(self.snapshot(), before)
         self.assertEqual(len((self.root / "report.jsonl").read_text(encoding="utf-8").splitlines()), 3)
+
+    def test_records_carry_file_state_and_run_status(self):
+        self.service["Long"] = [svc("apple", title="Long", duration=257.5)]
+        report, status = self.root / "report.jsonl", self.root / "last-run.json"
+        for _ in range(2):   # the second run reuses the stored result
+            code, records, _ = self.run_main("--resume", "--granular", "--report", str(report), "--run-status", str(status))
+            self.assertEqual(records[0]["size"], len(b"placeholder"))
+            self.assertRegex(records[0]["mtime"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{6}\+00:00$")
+            self.assertEqual([json.loads(l) for l in report.read_text(encoding="utf-8").splitlines()], records)
+            self.assertFalse(report.with_name("report.jsonl.tmp").exists())
+            run = json.loads(status.read_text(encoding="utf-8"))
+            self.assertEqual((run["exit"], run["records"]), (code, 1))
+            self.assertLessEqual(run["started"], run["finished"])
+
+    def test_interrupted_run_keeps_previous_report(self):
+        report, status = self.root / "report.jsonl", self.root / "last-run.json"
+        report.write_text("old\n", encoding="utf-8")
+        def stop(p): raise KeyboardInterrupt
+        self.patch_probe(stop)
+        with self.assertRaises(KeyboardInterrupt):
+            self.run_main("--report", str(report), "--run-status", str(status))
+        self.assertEqual(report.read_text(encoding="utf-8"), "old\n")
+        self.assertIsNone(json.loads(status.read_text(encoding="utf-8"))["finished"])
+
+    def test_file_changed_during_check_is_rechecked_then_skipped(self):
+        writes = {"02 Long": 1, "03 Missing": 9}   # Long changes once (rechecked), Missing on every check (skipped)
+        def probe(p):
+            if writes.get(p.stem):
+                writes[p.stem] -= 1
+                p.write_bytes(p.read_bytes() + b"x")
+            return dataclasses.replace(self.TRACKS[p.stem], path=str(p))
+        self.patch_probe(probe)
+        code, records, err = self.run_main("--verbose", "--granular")
+        self.assertEqual([(Path(r["file"]).name, r["size"]) for r in records],
+                         [("01 Good.mp3", 11), ("02 Long.flac", 12)])
+        self.assertIn('"error": "file changed while it was checked"', err)
+        self.assertEqual(writes["03 Missing"], 7)
 
     def test_report_inside_library_refused(self):
         before = self.snapshot()

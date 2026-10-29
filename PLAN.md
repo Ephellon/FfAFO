@@ -293,4 +293,14 @@ The PyLy controller uses FAFO output to flag incorrect songs. Planning runs on t
 3. **Rechecks:** PyLy `--fix-tags` changes tags only, never audio; a recheck after a tag write is fine. Suggested: key the recheck on an audio-stream hash rather than the file's mtime. **Open:** that needs a hash of the audio payload only, which still reads the whole file; worth measuring against the 1–2 s decode it would save.
 4. **Flowerbed roots:** not needed by PyLy (it keys on paths). Tag fixes change a file's root (§9.2).
 
-**Run order:** FAFO nightly compare at 23:00 must finish before PyLy's nightly (`R:\.etc\fetch-lyrics.ps1`, owned by Task Master) at 05:00.
+**Rulings received (PyLy Controller, second pass, `answer.md`; approved by the operator 2026-10-29):** FAFO data never writes tags, `album.nfo` or `.lrc`; a record only flags. `RELEASE_WITHDRAWN` acts (album queued for `--get-info --replace`; PyLy re-ranks editions itself). `TRACKLIST` and `AUDIO` flag and report (`AUDIO` prints the file's synced `.lrc` as suspect). `DURATION` is log-only, but over 5.0 s prints the `.lrc` as suspect. `ISRC` and `EXPLICIT` are log-only. PyLy reads the feed only (no `fafo.py` subprocess), keys on `file`/`folder`, last record wins.
+
+**Built for PyLy (2026-10-29):**
+- `--granular` (`compare`, `fingerprint`, `xv3`): `size` and `mtime` per file record, for PyLy's stale-record check.
+- `--report` is written to `PATH.tmp` and renamed over `PATH` when the run completes.
+- `--run-status PATH`: `{started, finished, exit, records}`; PyLy trusts the feed only when `finished` is set.
+- A file that changes while it is checked is rechecked once, then skipped (not stored; retried next run).
+- `TRACKLIST` `missing` entries as `NN Title` (`NN Title (CD DD)` on multi-disc releases), like PyLy's file names.
+- Nightly: `fafo.py compare "R:\Local" --resume --album-checks --granular --progress --report "R:\FAFO\mismatches.jsonl" --run-status "R:\FAFO\last-run.json"`, stdout discarded.
+
+**Run order (corrected):** PyLy's nightly (`\Personal\Fetch Lyrics`, `R:\.etc\fetch-lyrics.ps1`, owned by Task Master) starts at 20:00 and reads the previous night's feed; FAFO's compare starts at 23:00 and rechecks whatever PyLy changed. PyLy can still be writing after 23:00, hence the mid-check recheck.
