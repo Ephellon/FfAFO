@@ -433,10 +433,10 @@ def _checked_now() -> str:
 
 
 def _file_state(path: Path) -> dict:
-    """--granular `size` and `mtime` (ISO 8601 UTC, microseconds) FAFO saw; PyLy drops a record when the file
+    """--granular `size` and `mtime` (`os.stat` epoch seconds) FAFO saw; PyLy drops a record when the file
     no longer matches. Also used, with or without --granular, to recheck a file that changed while it was checked."""
     st = path.stat()
-    return {"size": st.st_size, "mtime": datetime.fromtimestamp(st.st_mtime, timezone.utc).isoformat(timespec="microseconds")}
+    return {"size": st.st_size, "mtime": st.st_mtime}
 
 
 def _write_atomic(path: Path, text: str) -> None:

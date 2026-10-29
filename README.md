@@ -72,7 +72,7 @@ Both `fingerprint` and `compare` can be interrupted and re-run: finished files a
 | `--flowerbed` | Add the tag-derived identity: `flowerbed` key, `root` and full `signature` (see [Flowerbed roots](#flowerbed-roots)) |
 | `--no-numpy` | Methodical mode: pure-Python FFT (same output, about 30× slower) |
 | `--subfingerprints` | Include the full `asfp-v2` sequence (list of 28-bit integers) in each record |
-| `--granular` | Add each file's `size` (bytes) and `mtime` (ISO 8601 UTC, microseconds) |
+| `--granular` | Add each file's `size` (bytes) and `mtime` (epoch seconds, as `os.stat`) |
 | `--quiet` | No per-file records on stdout; errors and the summary only |
 | `--progress` | Print `[n/total] path` per file to stderr |
 
@@ -94,7 +94,7 @@ One JSON line per file on stdout (here with `--flowerbed`):
 | `path...` | Library folder(s) and/or audio file(s). A single file's parent folder is treated as read-only too |
 | `--report PATH` | Also write the emitted records to this JSONL file (must be outside the folder). Written as `PATH.tmp` and renamed over `PATH` only when the run completes, so a reader never sees half a report and an interrupted run leaves the previous one |
 | `--run-status PATH` | Write `{"started", "finished", "exit", "records"}` (ISO 8601 UTC times) to this JSON file: at the start with `finished`/`exit` `null`, again when the run completes. `records` is the number of emitted records |
-| `--granular` | Add `size` (bytes) and `mtime` (ISO 8601 UTC, microseconds) of each file as FAFO saw it, so a reader can drop records for files changed since |
+| `--granular` | Add `size` (bytes) and `mtime` (epoch seconds, as `os.stat`) of each file as FAFO saw it, so a reader can drop records for files changed since |
 | `--verbose` | Also emit tracks that matched cleanly (`status: "ok"`) |
 | `--show-unresolved` | Also emit tracks no service could confidently match |
 | `--country CC` | Apple storefront, default `US`. Editions differ by storefront (e.g. the US store may only carry a clean edition) |
@@ -175,7 +175,7 @@ Record shape (`status` is `mismatch`, `ok`, `unresolved` or `error`):
 
 - `unresolved` records are just `{"file": ..., "status": "unresolved", "checked": ...}`; `error` records are `{"file": ..., "status": "error", "error": "message", "checked": ...}`.
 - `checked` (every record, file and album, added 2026-10-28 for PyLy) is when the file was really compared, ISO 8601 UTC. A record reused by `--resume` keeps its original time, so a caller can skip stale records. `file` and `folder` are absolute paths spelled as on disk.
-- With `--granular`, file records also carry `"size": 8123456, "mtime": "2026-10-28T20:15:03.123456+00:00"`: the file as FAFO saw it. `mtime` is `datetime.fromtimestamp(os.stat(path).st_mtime, timezone.utc).isoformat(timespec="microseconds")`, so a Python reader can compare the strings directly. Album records have neither (writing a `.lrc` changes a folder's mtime).
+- With `--granular`, file records also carry `"size": 8123456, "mtime": 1793232903.123456`: the file as FAFO saw it. `mtime` is `os.stat(path).st_mtime` (epoch seconds; a file replaced by an older-dated copy still differs). Album records have neither (writing a `.lrc` changes a folder's mtime).
 - A file whose size or mtime changes while it is being checked is checked once more; if it changes again it is skipped as an `error` record (`"file changed while it was checked"`), which is not stored, so the next run retries it. This holds with or without `--granular`.
 - `audio` is present only when a preview was checked. `ber` is the bit error rate (0 = identical, about 0.5 = unrelated); `preview_at` is where the preview starts in the library file, in seconds. If the preview could not be checked, `audio` is `{"service": ..., "error": "message"}` and the metadata mismatches are still reported.
 

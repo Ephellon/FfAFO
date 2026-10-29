@@ -288,7 +288,7 @@ class MainTests(unittest.TestCase):
         for _ in range(2):   # the second run reuses the stored result
             code, records, _ = self.run_main("--resume", "--granular", "--report", str(report), "--run-status", str(status))
             self.assertEqual(records[0]["size"], len(b"placeholder"))
-            self.assertRegex(records[0]["mtime"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{6}\+00:00$")
+            self.assertEqual(records[0]["mtime"], (self.library / "Album" / "02 Long.flac").stat().st_mtime)
             self.assertEqual([json.loads(l) for l in report.read_text(encoding="utf-8").splitlines()], records)
             self.assertFalse(report.with_name("report.jsonl.tmp").exists())
             run = json.loads(status.read_text(encoding="utf-8"))

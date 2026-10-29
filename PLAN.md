@@ -296,7 +296,7 @@ The PyLy controller uses FAFO output to flag incorrect songs. Planning runs on t
 **Rulings received (PyLy Controller, second pass, `answer.md`; approved by the operator 2026-10-29):** FAFO data never writes tags, `album.nfo` or `.lrc`; a record only flags. `RELEASE_WITHDRAWN` acts (album queued for `--get-info --replace`; PyLy re-ranks editions itself). `TRACKLIST` and `AUDIO` flag and report (`AUDIO` prints the file's synced `.lrc` as suspect). `DURATION` is log-only, but over 5.0 s prints the `.lrc` as suspect. `ISRC` and `EXPLICIT` are log-only. PyLy reads the feed only (no `fafo.py` subprocess), keys on `file`/`folder`, last record wins.
 
 **Built for PyLy (2026-10-29):**
-- `--granular` (`compare`, `fingerprint`, `xv3`): `size` and `mtime` per file record, for PyLy's stale-record check.
+- `--granular` (`compare`, `fingerprint`, `xv3`): `size` and `mtime` (epoch seconds, per PyLy note ee5c59acdec4) per file record, for PyLy's stale-record check.
 - `--report` is written to `PATH.tmp` and renamed over `PATH` when the run completes.
 - `--run-status PATH`: `{started, finished, exit, records}`; PyLy trusts the feed only when `finished` is set.
 - A file that changes while it is checked is rechecked once, then skipped (not stored; retried next run).

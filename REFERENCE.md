@@ -203,7 +203,7 @@ CLI options, output records, mismatch codes and exit codes are documented in `RE
 - **`collect_files(paths) -> (files, roots)`** — sorted, de-duplicated audio files under any mix of folders and files, plus the folders that must stay read-only (a file protects its parent). Raises `ValueError` for missing paths or non-audio files.
 - **`build_index(files, index, progress)`** — `--index-only` loop.
 - **`tracklist_check(tracks, release)`** — `TRACKLIST`; `missing` named like library files (`NN Title`, `NN Title (CD DD)` on multi-disc releases).
-- **`_file_state(path)`** — `{size, mtime}` (ISO 8601 UTC, microseconds): `--granular` fields, and the mid-check change test (a changed file is checked once more, then skipped).
+- **`_file_state(path)`** — `{size, mtime}` (`os.stat` epoch seconds): `--granular` fields, and the mid-check change test (a changed file is checked once more, then skipped).
 - **`_write_atomic(path, text)`** — write `path.tmp`, then `os.replace`; used for `--run-status`. `--report` streams to `PATH.tmp` and is renamed when the run completes.
 - **`main(argv=None, adapters=None, prog=None) -> int`** — CLI (also `fafo.py compare`); `adapters` can be injected (tests use fakes).
 
