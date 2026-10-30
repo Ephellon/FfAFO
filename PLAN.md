@@ -302,5 +302,6 @@ The PyLy controller uses FAFO output to flag incorrect songs. Planning runs on t
 - A file that changes while it is checked is rechecked once, then skipped (not stored; retried next run).
 - `TRACKLIST` `missing` entries as `NN Title` (`NN Title (CD DD)` on multi-disc releases), like PyLy's file names.
 - Nightly: `fafo.py compare "R:\Local" --resume --album-checks --granular --progress --report "R:\FAFO\mismatches.jsonl" --run-status "R:\FAFO\last-run.json"`, stdout discarded.
+- 2026-10-30: `R:\FAFO\nightly-compare.cmd` switched to that line (live from the next 23:00 run). `sample.jsonl` posted to share `fafo-pyly-flagging`: 20 records (14 file, 6 album) re-emitted in the new format, covering every code the 2026-10-29 run produced (`AUDIO`, `DURATION`, `TITLE_VERSION`, `TRACKLIST`, `RELEASE_WITHDRAWN`; no `ISRC` or `EXPLICIT` occurred). Note to `pyly-controller` describes the fields; no build job posted.
 
 **Run order (corrected):** PyLy's nightly (`\Personal\Fetch Lyrics`, `R:\.etc\fetch-lyrics.ps1`, owned by Task Master) starts at 20:00 and reads the previous night's feed; FAFO's compare starts at 23:00 and rechecks whatever PyLy changed. PyLy can still be writing after 23:00, hence the mid-check recheck.
